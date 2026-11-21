@@ -1,0 +1,31 @@
+From c0dc965f0d918e444bf8b9c4958e735544ee46d9 Mon Sep 17 00:00:00 2001
+From: "Bernhard M. Wiedemann" <bwiedemann@suse.de>
+Date: Sat, 21 Nov 2026 19:49:15 +0100
+Subject: [PATCH 5/5] Use ndarray.tobytes() in numpy_io (tostring was removed
+ in numpy 2)
+
+from_numpy() passed the buffer with array.tostring(), which numpy 2
+removed.  tobytes() is the direct replacement and has been available
+since numpy 1.9.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ gamera-4/gamera/plugins/numpy_io.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/gamera-4/gamera/plugins/numpy_io.py b/gamera-4/gamera/plugins/numpy_io.py
+index 6e05b73..3c6fd80 100644
+--- a/gamera-4/gamera/plugins/numpy_io.py
++++ b/gamera-4/gamera/plugins/numpy_io.py
+@@ -93,7 +93,7 @@ else:
+                 offset,
+                 Dim(array.shape[1], array.shape[0]),
+                 pixel_type, DENSE,
+-                array.tostring())
++                array.tobytes())
+ 
+         __call__ = staticmethod(__call__)
+ 
+-- 
+2.56.0
+

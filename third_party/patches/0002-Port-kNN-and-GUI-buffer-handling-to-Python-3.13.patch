@@ -1,0 +1,178 @@
+From 41847bdd18b03ef4c8f123ba620263627d3c8bea Mon Sep 17 00:00:00 2001
+From: "Bernhard M. Wiedemann" <bwiedemann@suse.de>
+Date: Sat, 21 Nov 2026 19:48:43 +0100
+Subject: [PATCH 2/5] Port kNN and GUI buffer handling to Python 3.13
+
+Python 3.13 removed the old buffer API: PyObject_CheckReadBuffer,
+PyObject_AsReadBuffer and PyObject_AsWriteBuffer.  Add
+include/pycompat.hpp, which maps those calls onto the buffer protocol
+(PyObject_CheckBuffer/PyObject_GetBuffer) on 3.13+ and leaves the old
+calls untouched on older Pythons.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ gamera-4/include/knnmodule.hpp           |  7 +--
+ gamera-4/include/plugins/gui_support.hpp |  5 ++-
+ gamera-4/include/pycompat.hpp            | 54 ++++++++++++++++++++++++
+ gamera-4/src/knncore/knncoremodule.cpp   | 11 ++---
+ 4 files changed, 67 insertions(+), 10 deletions(-)
+ create mode 100644 gamera-4/include/pycompat.hpp
+
+diff --git a/gamera-4/include/knnmodule.hpp b/gamera-4/include/knnmodule.hpp
+index 8178602..8e4cffb 100644
+--- a/gamera-4/include/knnmodule.hpp
++++ b/gamera-4/include/knnmodule.hpp
+@@ -24,6 +24,7 @@
+ #define KWM12172002_knnmodule
+ 
+ #include <Python.h>
++#include "pycompat.hpp"
+ #include "knn.hpp"
+ 
+ using namespace Gamera;
+@@ -48,11 +49,11 @@ enum DistanceType {
+ inline int image_get_fv(PyObject* image, double** buf, Py_ssize_t* len) {
+ 	ImageObject* x = (ImageObject*)image;
+ 	
+-	if (PyObject_CheckReadBuffer(x->m_features) < 0) {
++	if (!GAMERA_PyObject_CheckReadBuffer(x->m_features)) {
+ 		return -1;
+ 	}
+-	
+-	if (PyObject_AsReadBuffer(x->m_features, (const void**)buf, len) < 0) {
++
++	if (GAMERA_PyObject_AsReadBuffer(x->m_features, (const void**)buf, len) < 0) {
+ 		PyErr_SetString(PyExc_TypeError, "knn: Could not use image as read buffer.");
+ 		return -1;
+ 	}
+diff --git a/gamera-4/include/plugins/gui_support.hpp b/gamera-4/include/plugins/gui_support.hpp
+index 1f7388e..fa97e62 100644
+--- a/gamera-4/include/plugins/gui_support.hpp
++++ b/gamera-4/include/plugins/gui_support.hpp
+@@ -22,6 +22,7 @@
+ #define kwm01102002_to_string
+ 
+ #include <Python.h>
++#include "../pycompat.hpp"
+ #include "gamera.hpp"
+ #include "vigra/resizeimage.hxx"
+ #include "image_utilities.hpp"
+@@ -209,11 +210,11 @@ PyObject* to_string(T& m) {
+ }
+ 
+ static char *get_writable_buffer(PyObject *py_buffer, size_t nrows, size_t ncols) {
+-	if (PyObject_CheckReadBuffer(py_buffer) == 1) {
++	if (GAMERA_PyObject_CheckReadBuffer(py_buffer) == 1) {
+ 		// Old Buffer Protocol
+ 		char *buffer;
+ 		Py_ssize_t buffer_len;
+-		PyObject_AsWriteBuffer(py_buffer, (void **)&buffer, &buffer_len);
++		GAMERA_PyObject_AsWriteBuffer(py_buffer, (void **)&buffer, &buffer_len);
+ 		
+ 		if ((size_t)buffer_len != nrows * ncols * 3 || buffer == nullptr) {
+ 			printf("The image passed to to_buffer is not of the correct size.\n");
+diff --git a/gamera-4/include/pycompat.hpp b/gamera-4/include/pycompat.hpp
+new file mode 100644
+index 0000000..b42db6e
+--- /dev/null
++++ b/gamera-4/include/pycompat.hpp
+@@ -0,0 +1,54 @@
++#ifndef GAMERA_PYCOMPAT_HPP
++#define GAMERA_PYCOMPAT_HPP
++
++#include <Python.h>
++
++/*
++ * Python 3.13 removed the old (pre-PEP 3118) buffer API:
++ *   PyObject_CheckReadBuffer, PyObject_AsReadBuffer, PyObject_AsWriteBuffer.
++ *
++ * Gamera's kNN and GUI code still uses it.  On older Pythons keep the
++ * original calls; on 3.13+ map them onto the buffer protocol.
++ */
++
++#if PY_VERSION_HEX < 0x030D0000
++
++#define GAMERA_PyObject_CheckReadBuffer(o) PyObject_CheckReadBuffer(o)
++#define GAMERA_PyObject_AsReadBuffer(o, b, l) PyObject_AsReadBuffer((o), (b), (l))
++#define GAMERA_PyObject_AsWriteBuffer(o, b, l) PyObject_AsWriteBuffer((o), (b), (l))
++
++#else
++
++static inline int
++GAMERA_PyObject_CheckReadBuffer(PyObject *obj)
++{
++    return PyObject_CheckBuffer(obj);
++}
++
++static inline int
++GAMERA_PyObject_AsReadBuffer(PyObject *obj, const void **buf, Py_ssize_t *len)
++{
++    Py_buffer view;
++    if (PyObject_GetBuffer(obj, &view, PyBUF_SIMPLE) < 0)
++        return -1;
++    *buf = view.buf;
++    *len = view.len;
++    PyBuffer_Release(&view);
++    return 0;
++}
++
++static inline int
++GAMERA_PyObject_AsWriteBuffer(PyObject *obj, void **buf, Py_ssize_t *len)
++{
++    Py_buffer view;
++    if (PyObject_GetBuffer(obj, &view, PyBUF_WRITABLE) < 0)
++        return -1;
++    *buf = view.buf;
++    *len = view.len;
++    PyBuffer_Release(&view);
++    return 0;
++}
++
++#endif
++
++#endif /* GAMERA_PYCOMPAT_HPP */
+diff --git a/gamera-4/src/knncore/knncoremodule.cpp b/gamera-4/src/knncore/knncoremodule.cpp
+index fd3081d..01b5833 100644
+--- a/gamera-4/src/knncore/knncoremodule.cpp
++++ b/gamera-4/src/knncore/knncoremodule.cpp
+@@ -26,6 +26,7 @@
+ */
+ 
+ #include <Python.h>
++#include "pycompat.hpp"
+ #include "gameramodule.hpp"
+ #include "knn.hpp"
+ #include "knncoremodule.hpp"
+@@ -1373,12 +1374,12 @@ static PyObject* knn_set_selections(PyObject* self, PyObject* args) {
+ 	Py_ssize_t len;
+ 	int *selections;
+ 	
+-	if (!PyObject_CheckReadBuffer(array)) {
++	if (!GAMERA_PyObject_CheckReadBuffer(array)) {
+ 		PyErr_SetString(PyExc_RuntimeError, "knn: Error getting selection array buffer.");
+ 		return nullptr;
+ 	}
+-	
+-	if ((PyObject_AsReadBuffer(array, (const void**)&selections, &len) != 0)) {
++
++	if ((GAMERA_PyObject_AsReadBuffer(array, (const void**)&selections, &len) != 0)) {
+ 		PyErr_SetString(PyExc_RuntimeError, "knn: Error getting selection array buffer.");
+ 		return nullptr;
+ 	}
+@@ -1410,11 +1411,11 @@ static PyObject* knn_set_weights(PyObject* self, PyObject* args) {
+ 	}
+ 	Py_ssize_t len;
+ 	double* weights;
+-	if (!PyObject_CheckReadBuffer(array)) {
++	if (!GAMERA_PyObject_CheckReadBuffer(array)) {
+ 		PyErr_SetString(PyExc_RuntimeError, "knn: Error getting weight array buffer.");
+ 		return nullptr;
+ 	}
+-	if ((PyObject_AsReadBuffer(array, (const void**)&weights, &len) != 0)) {
++	if ((GAMERA_PyObject_AsReadBuffer(array, (const void**)&weights, &len) != 0)) {
+ 		PyErr_SetString(PyExc_RuntimeError, "knn: Error getting weight array buffer.");
+ 		return nullptr;
+ 	}
+-- 
+2.56.0
+

@@ -1,0 +1,166 @@
+"""Segmentation: connected components, text filtering, barlines, overlays."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+from PIL import Image, ImageDraw
+
+from .staffs import Staff
+
+
+@dataclass
+class Component:
+    glyph: object
+    x0: int
+    y0: int
+    x1: int
+    y1: int
+
+    @property
+    def w(self) -> int:
+        return self.x1 - self.x0 + 1
+
+    @property
+    def h(self) -> int:
+        return self.y1 - self.y0 + 1
+
+    @property
+    def cx(self) -> float:
+        return (self.x0 + self.x1) / 2
+
+    @property
+    def cy(self) -> float:
+        return (self.y0 + self.y1) / 2
+
+    @property
+    def area(self) -> int:
+        return self.w * self.h
+
+
+def components(image) -> list[Component]:
+    out = []
+    for glyph in image.cc_analysis():
+        out.append(Component(glyph, glyph.offset_x, glyph.offset_y,
+                             glyph.offset_x + glyph.ncols - 1,
+                             glyph.offset_y + glyph.nrows - 1))
+    return out
+
+
+def filter_components(comps: list[Component], staff: Staff):
+    """Keep note-like components; drop lyrics, noise, and staff remnants."""
+    top, bottom = staff.band(above=4.5, below=2.2)
+    kept, dropped = [], {"outside": 0, "outside_x": 0, "tiny": 0, "text": 0, "staffline": 0}
+    for c in comps:
+        if c.cy < top or c.cy > bottom:
+            dropped["outside"] += 1
+            continue
+        if c.cx < staff.left - 0.5 * staff.space or c.cx > staff.right + 0.5 * staff.space:
+            dropped["outside_x"] += 1
+            continue
+        if c.area < 4:
+            dropped["tiny"] += 1
+            continue
+        if c.h > 10 * staff.space:
+            dropped["text"] += 1
+            continue
+        # a staff-line remnant is a long, very thin horizontal stroke
+        if c.w >= 0.6 * (staff.right - staff.left) and c.h <= staff.thickness + 2:
+            dropped["staffline"] += 1
+            continue
+        kept.append(c)
+    return kept, dropped
+
+
+def find_barlines(arr: np.ndarray, staff: Staff) -> list[float]:
+    """Column centres of full-height vertical strokes (barlines)."""
+    top = max(0, int(round(staff.top)) - 3)
+    bottom = min(arr.shape[0] - 1, int(round(staff.bottom)) + 3)
+    band = arr[top:bottom + 1, :]
+    top_off = int(round(staff.top)) - top
+    bot_off = int(round(staff.bottom)) - top
+    staff_px = bot_off - top_off + 1
+    x0 = max(0, int(round(staff.left)))
+    x1 = min(arr.shape[1] - 1, int(round(staff.right)))
+    candidates = []
+    for x in range(x0, x1 + 1):
+        column = band[:, x]
+        idx = np.flatnonzero(column)
+        if len(idx) == 0:
+            continue
+        breaks = np.flatnonzero(np.diff(idx) > 1)
+        starts = np.r_[idx[0], idx[breaks + 1]]
+        ends = np.r_[idx[breaks], idx[-1]]
+        lengths = ends - starts + 1
+        k = int(np.argmax(lengths))
+        if lengths[k] < 0.95 * staff_px:
+            continue
+        # Barlines start at/above the top line and extend below the bottom
+        # line; stems end at a staff line, so they fail the lower test.
+        if starts[k] > top_off + 2 or ends[k] < bot_off + 2:
+            continue
+        candidates.append(x)
+    groups = []
+    for x in candidates:
+        if groups and x - groups[-1][-1] <= 1:
+            groups[-1].append(x)
+        else:
+            groups.append([x])
+    barlines = []
+    start = staff.left + 5.0 * staff.space   # skip the clef/key signature zone
+    for group in groups:
+        width = group[-1] - group[0] + 1
+        centre = (group[0] + group[-1]) / 2
+        if width > max(2.0, 0.6 * staff.space):
+            continue
+        if centre < start:
+            continue
+        barlines.append(centre)
+    return barlines
+
+
+def measure_bounds(staff: Staff, barlines: list[float]) -> list[tuple[float, float]]:
+    start = staff.left + 5.0 * staff.space
+    right = staff.right
+    edges = [start]
+    for x in barlines:
+        if x > edges[-1] + 1.0 * staff.space:
+            edges.append(x)
+    if right > edges[-1] + 1.0 * staff.space:
+        edges.append(right)
+    bounds = list(zip(edges[:-1], edges[1:]))
+    return [(a, b) for a, b in bounds if b - a >= 1.5 * staff.space]
+
+
+def assign_measures(comps: list[Component], bounds: list[tuple[float, float]]):
+    out = {i: [] for i in range(len(bounds))}
+    for c in comps:
+        for i, (x0, x1) in enumerate(bounds):
+            if x0 <= c.cx < x1:
+                out[i].append(c)
+                break
+    return out
+
+
+def save_overlay(page_path: str | Path, staves: list[Staff], barlines_by_staff: dict[int, list[float]],
+                 comps: list[Component], out_path: str | Path):
+    img = Image.open(page_path).convert("RGB")
+    draw = ImageDraw.Draw(img)
+    for staff in staves:
+        for y in staff.lines:
+            draw.line([(staff.left, y), (staff.right, y)], fill=(0, 160, 0), width=1)
+        for x in barlines_by_staff.get(staff.index, []):
+            draw.line([(x, staff.top - 4), (x, staff.bottom + 4)], fill=(220, 0, 0), width=2)
+    for c in comps:
+        draw.rectangle([c.x0, c.y0, c.x1, c.y1], outline=(0, 0, 220), width=1)
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    img.save(out_path)
+
+
+def save_mask(arr: np.ndarray, out_path: str | Path):
+    """Save a 0/1 array as a black-on-white PNG."""
+    img = Image.fromarray(np.where(arr.astype(bool), 0, 255).astype("uint8"))
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    img.save(out_path)

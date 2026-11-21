@@ -1,0 +1,102 @@
+From b528fd7d13e510c2260aa7640d7c08ebed6bf45e Mon Sep 17 00:00:00 2001
+From: "Bernhard M. Wiedemann" <bwiedemann@suse.de>
+Date: Sat, 21 Nov 2026 19:48:43 +0100
+Subject: [PATCH 4/5] Port the staff finders to Python 3 integer semantics
+
+- stafffinder_projections: window and peak indices are integers again;
+  "/" produced floats and broke list indexing and slicing.
+- stafffinder_dalitz: replace dict.has_key/iteritems.
+
+The Dalitz finder still needs its C++ plugin (get_staff_skeleton_list),
+which is not part of this tree; projections and Miyao work.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ .../toolkits/musicstaves/stafffinder_dalitz.py |  4 ++--
+ .../musicstaves/stafffinder_projections.py     | 18 +++++++++---------
+ 2 files changed, 11 insertions(+), 11 deletions(-)
+
+diff --git a/musicstaves/gamera/toolkits/musicstaves/stafffinder_dalitz.py b/musicstaves/gamera/toolkits/musicstaves/stafffinder_dalitz.py
+index 0881e34..dab1e26 100644
+--- a/musicstaves/gamera/toolkits/musicstaves/stafffinder_dalitz.py
++++ b/musicstaves/gamera/toolkits/musicstaves/stafffinder_dalitz.py
+@@ -426,13 +426,13 @@ processing.
+             for g in groups:
+                 if g.col_end - g.col_start + 1 > max_group_width / 2:
+                     n = g.max_line - g.min_line + 1
+-                    if num_hist.has_key(n):
++                    if n in num_hist:
+                         num_hist[n] += 1
+                     else:
+                         num_hist[n] = 1
+             max_count = 0
+             estimated_num_lines = 0
+-            for (n,c) in num_hist.iteritems():
++            for (n,c) in num_hist.items():
+                 if c > max_count:
+                     estimated_num_lines = n
+                     max_count = c
+diff --git a/musicstaves/gamera/toolkits/musicstaves/stafffinder_projections.py b/musicstaves/gamera/toolkits/musicstaves/stafffinder_projections.py
+index 1123992..b2b79e3 100644
+--- a/musicstaves/gamera/toolkits/musicstaves/stafffinder_projections.py
++++ b/musicstaves/gamera/toolkits/musicstaves/stafffinder_projections.py
+@@ -213,7 +213,7 @@ with
+ 			if p >= threshold and not above:
+ 				above = True
+ 				if lastabove != None and i - lastabove > minstaffheight:
+-					staffbreaks.append((i+lastbelow)/2)
++					staffbreaks.append((i+lastbelow)//2)
+ 					lastabove = i
+ 				elif lastabove == None:
+ 					lastabove = i
+@@ -234,12 +234,12 @@ with
+ 		staffbegin = 0
+ 		for staffend in staffbreaks:
+ 			#minpeakheight += [threshold * max(avgproj[staffbegin:staffend])] \
+-			minpeakheight += [peakthreshold * max(yproj[staffbegin:staffend])] \
++			minpeakheight += [peakthreshold * max(yproj[int(staffbegin):int(staffend)])] \
+ 							 * (staffend - staffbegin)
+ 			staffbegin = staffend
+ 		staffend = self.image.nrows
+ 		#minpeakheight += [threshold * max(avgproj[staffbegin:staffend])] \
+-		minpeakheight += [peakthreshold * max(yproj[staffbegin:staffend])] \
++		minpeakheight += [peakthreshold * max(yproj[int(staffbegin):int(staffend)])] \
+ 						 * (staffend - staffbegin)
+ 
+ 		if debug > 1:
+@@ -273,7 +273,7 @@ with
+ 			while dx == 0 and i < len(avgproj) - 1:
+ 				i += 1
+ 				dx = avgproj[i] - avgproj[i-1]
+-			peaki = (lasti + i) / 2
++			peaki = (lasti + i) // 2
+ 			if lastdx > 0 and dx < 0 and \
+ 				   avgproj[peaki] > minpeakheight[i]:
+ 				peaks.append([peaki,avgproj[peaki]])
+@@ -429,8 +429,8 @@ with
+ 	def __lowpass(self, vec, windowwidth):
+ 		avg = [0] * len(vec)
+ 		window = [0] * windowwidth
+-		avgi = - windowwidth / 2
+-		zeros = array(vec.typecode, [0] * (windowwidth/2))
++		avgi = - windowwidth // 2
++		zeros = array(vec.typecode, [0] * (windowwidth // 2))
+ 		for i,p in enumerate(vec + zeros):
+ 			del window[0]
+ 			window.append(p)
+@@ -507,9 +507,9 @@ with
+ 	#     while the peakheight is to be taken from the raw profile
+ 	#
+ 	def __get_peakheight(self, ypos, yproj):
+-		tolerance = self.staffline_height / 2
+-		ymin = max([0, ypos - tolerance/2])
+-		ymax = min([len(yproj) - 1, ypos + tolerance/2])
++		tolerance = self.staffline_height // 2
++		ymin = max(0, int(ypos - tolerance / 2))
++		ymax = min(len(yproj) - 1, int(ypos + tolerance / 2))
+ 		return max(yproj[ymin:ymax+1])
+ 
+ 	######################################################################
+-- 
+2.56.0
+

@@ -1,0 +1,30 @@
+From 766498c7dae57db12c7ae145efd73b395d399738 Mon Sep 17 00:00:00 2001
+From: "Bernhard M. Wiedemann" <bwiedemann@suse.de>
+Date: Sat, 21 Nov 2026 19:48:43 +0100
+Subject: [PATCH 3/5] Use np.complex64 instead of the removed np.complex32
+ alias
+
+numpy 2 removed np.complex32; it was an alias for complex64.  The legacy
+AFNI BRIK reader is the only user (BRICK_TYPES 5).
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ gamera-4/gamera/io.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/gamera-4/gamera/io.py b/gamera-4/gamera/io.py
+index dd2b8f6..03a9f47 100644
+--- a/gamera-4/gamera/io.py
++++ b/gamera-4/gamera/io.py
+@@ -501,7 +501,7 @@ Usage:  brikget(imfile,unpackstr=np.int16,shp=None)  default shp: (-1,48,61,51)
+                 elif first5[0] == 3:
+                     unpackstr = np.float32
+                 elif first5[0] == 5:
+-                    unpackstr = np.complex32
++                    unpackstr = np.complex64  # np.complex32 removed in numpy 2
+         dims.reverse()
+         shp = [-1]+dims
+     except IOError:
+-- 
+2.56.0
+
