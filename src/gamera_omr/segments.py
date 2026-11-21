@@ -50,9 +50,10 @@ def components(image) -> list[Component]:
 
 
 def filter_components(comps: list[Component], staff: Staff):
-    """Keep note-like components; drop lyrics, noise, and staff remnants."""
-    top, bottom = staff.band(above=4.5, below=2.2)
-    kept, dropped = [], {"outside": 0, "outside_x": 0, "tiny": 0, "text": 0, "staffline": 0}
+    """Keep musical symbols; drop lyrics, noise, staff remnants and barlines."""
+    top, bottom = staff.band(above=4.5, below=1.2)
+    kept, dropped = [], {"outside": 0, "outside_x": 0, "tiny": 0, "text": 0,
+                         "staffline": 0, "barline": 0}
     for c in comps:
         if c.cy < top or c.cy > bottom:
             dropped["outside"] += 1
@@ -62,6 +63,14 @@ def filter_components(comps: list[Component], staff: Staff):
             continue
         if c.area < 4:
             dropped["tiny"] += 1
+            continue
+        if c.w <= max(4.0, 0.35 * staff.space) and c.h >= 3.0 * staff.space:
+            dropped["barline"] += 1
+            continue
+        # Letters (lyrics) are short; noteheads+stems are at least ~2 spaces
+        # tall, beams are wide.  Dots are picked up separately by the decoder.
+        if c.h < 0.75 * staff.space and c.w < 1.5 * staff.space:
+            dropped["text"] += 1
             continue
         if c.h > 10 * staff.space:
             dropped["text"] += 1
@@ -122,10 +131,18 @@ def find_barlines(arr: np.ndarray, staff: Staff) -> list[float]:
 
 
 def measure_bounds(staff: Staff, barlines: list[float]) -> list[tuple[float, float]]:
-    start = staff.left + 5.0 * staff.space
     right = staff.right
+    start = staff.left + 5.0 * staff.space
+    bars = list(barlines)
+    # An instrumental incipit at the start of the first system ends with a
+    # double bar; the vocal part begins at the second line.  Starting at that
+    # bar avoids a phantom measure made of the clef/time signature.
+    nearby = [b for b in bars if b < staff.left + 15.0 * staff.space]
+    if len(nearby) >= 2 and nearby[1] - nearby[0] <= 1.5 * staff.space:
+        start = nearby[1]
+        bars = [b for b in bars if b > start]
     edges = [start]
-    for x in barlines:
+    for x in bars:
         if x > edges[-1] + 1.0 * staff.space:
             edges.append(x)
     if right > edges[-1] + 1.0 * staff.space:

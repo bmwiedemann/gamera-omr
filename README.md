@@ -3,9 +3,23 @@
 An optical music recognition engine for the BWV 248 project, built on
 **Gamera 4 + the MusicStaves toolkit** (the recognition core that Rodan wraps).
 
-Status: **Stage 1** — Python 3.13 port, staff finding/validation, staff-line removal,
-connected-component segmentation, barline/measure detection, and debug overlays.
-Glyph classification and MusicXML decoding are next.
+Status: **Stage 1 + first reader** — Python 3.13 port, staff finding/validation,
+staff-line removal, connected-component segmentation, barline/measure detection, a
+kNN glyph classifier, note/beam decoding, MusicXML output, and debug overlays.
+
+## Current results
+
+Scored against the checked NBA-derived readings (`partitur/BWV248/gemeinfrei/...`) with
+`sheetscan/bench/evalscore.py`:
+
+| page | truth notes | omr notes | note F1 | pitch F1 |
+|---|---|---|---|---|
+| Nr. 5 Choral, NBA soprano (`work/mvt/5/stacks/nba/S-01.png`) | 45 | 43 | **0.95** | **0.98** |
+| Nr. 12 Choral, NBA soprano (`work/mvt/12/stacks/nba/S-01.png`) | 49 | 46 | 0.44 | 0.80 |
+
+Known gaps (v1): in-measure accidentals (Nr. 12's C♯ is read as C), notes whose head is
+merged with a slur/fermata, beamed-group rhythm on dense pages, rests, and per-font
+models (the shipped model is trained on the NBA chorale font).
 
 ## Why
 
@@ -48,6 +62,20 @@ editable, and runs a smoke test.
 # write 01-binary.png, 02-clean.png (staffs removed) and 03-overlay.png
 .venv/bin/python -m gamera_omr.cli debug \
     --image ~/git/music/work/mvt/5/stacks/nba/S-01.png --out /tmp/debug5
+
+# read a page to MusicXML
+.venv/bin/python -m gamera_omr.cli read \
+    --image ~/git/music/work/mvt/5/stacks/nba/S-01.png \
+    --source nba --voice S --movement 5 -o /tmp/S5.musicxml
+
+# rebuilding the glyph model (headless labelling)
+.venv/bin/python -m gamera_omr.cli corpus --image IMAGE.png --out /tmp/corpus
+.venv/bin/python -m gamera_omr.cli sheet --corpus /tmp/corpus \
+    --clusters 40 --out /tmp/corpus/s0
+# ... view /tmp/corpus/s0/sheet.png, write cluster labels, then:
+.venv/bin/python -m gamera_omr.cli train --corpus /tmp/corpus \
+    --labels models/common/labels.json --sheet /tmp/corpus/s0/sheet.json \
+    --out models/common/model.xml
 ```
 
 The input stacks are the existing per-voice stack pages from the BWV 248 pipeline
