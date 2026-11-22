@@ -138,12 +138,33 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
                  dots: list[tuple[float, float]] | None = None,
                  legacy: bool = False,
                  bar_length: Fraction = Fraction(4),
-                 require_head: bool = False) -> list[Event]:
+                 require_head: bool = False,
+                 recover_edges: bool = False) -> list[Event]:
     from . import notes as notes_module  # local import avoids a cycle
 
     if templates is None:
         templates = notes_module.make_templates(glyphs, predictions)
     events = []
+
+    def measure_of(x: float) -> int | None:
+        if not bounds:
+            return None
+        for i, (x0, x1) in enumerate(bounds):
+            if x0 <= x < x1:
+                return i
+        # Notes immediately after the clef or before the last barline fall
+        # outside the trimmed bounds; keep those close to the edge in the
+        # edge measures, but do not pull in margin/clef components.
+        if x < bounds[0][0]:
+            left_limit = (staff.left + 1.5 * staff.space if recover_edges
+                          else bounds[0][0] - 2.0 * staff.space)
+            return 0 if x >= left_limit else None
+        if x >= bounds[-1][1]:
+            right_limit = (staff.right if recover_edges
+                           else bounds[-1][1] + 2.0 * staff.space)
+            return len(bounds) - 1 if x <= right_limit else None
+        return None
+
     for g in glyphs:
         if g.staff != staff.index:
             continue
@@ -157,36 +178,38 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
                 and g.h >= 2.5 * staff.space and g.w <= 1.6 * staff.space):
             continue
         label = predictions.get(g.uid, {}).get("label", "skip")
+        wide_note = False
         if label in ("note.black", "note.open"):
             # Beams, slurs and ornaments above the staff are sometimes
-            # classified as a note; they are wide/flat compared with a head.
-            if g.w > 2.5 * g.space or g.h < 0.6 * g.space:
+            # classified as a note; they are flat compared with a head.  A
+            # wide but tall glyph is a beamed group misclassified as one
+            # note, so split it below instead of dropping its heads.
+            if g.h < 0.6 * g.space:
                 continue
+            wide_note = g.w > 2.5 * g.space
         if label.startswith("rest."):
             duration = (bar_length if label == "rest.measure"
                         else REST_DURATIONS.get(label))
             if duration is None:
                 continue
-            measure = None
-            for i, (x0, x1) in enumerate(bounds):
-                if x0 <= g.cx < x1:
-                    measure = i
-                    break
+            measure = measure_of(g.cx)
             if measure is not None:
                 events.append(Event(measure, g.cx, None, duration, "rest", g,
                                     hy=g.y0 + g.h / 2))
             continue
-        if label == "beam.group":
-            for hx, hy, duration in notes_module.split_beam_group(g.ink, g.space, templates):
+        if label == "beam.group" or wide_note:
+            heads = notes_module.split_beam_group(g.ink, g.space, templates)
+            # Only a genuinely polyphonic wide glyph is a misclassified
+            # beamed group.  A single split head from a wide note+slur is a
+            # false positive in the NBA/Rösler/Sibley prints.
+            if not heads or (wide_note and len(heads) < 2):
+                continue
+            for hx, hy, duration in heads:
                 head_y = g.y0 + hy
                 position = staff_position(staff, head_y)
                 pitch = pitch_at(staff, clef, position, fifths)
                 x = g.x0 + hx
-                measure = None
-                for i, (x0, x1) in enumerate(bounds):
-                    if x0 <= x < x1:
-                        measure = i
-                        break
+                measure = measure_of(x)
                 if measure is not None:
                     events.append(Event(measure, x, pitch, duration, "note", g,
                                         flexible=True, hy=head_y))
@@ -207,11 +230,7 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
                     head_y = g.y0 + cy
                     position = staff_position(staff, head_y)
                     pitch = pitch_at(staff, clef, position, fifths)
-                    measure = None
-                    for i, (x0, x1) in enumerate(bounds):
-                        if x0 <= g.cx < x1:
-                            measure = i
-                            break
+                    measure = measure_of(g.cx)
                     if measure is not None:
                         events.append(Event(measure, g.cx, pitch, duration,
                                             "note", g, hy=head_y))
@@ -228,11 +247,7 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
                 continue
         position = staff_position(staff, head_y)
         pitch = pitch_at(staff, clef, position, fifths)
-        measure = None
-        for i, (x0, x1) in enumerate(bounds):
-            if x0 <= g.cx < x1:
-                measure = i
-                break
+        measure = measure_of(g.cx)
         if measure is None:
             continue
         events.append(Event(measure, g.cx, pitch, duration, "note", g, hy=head_y))
