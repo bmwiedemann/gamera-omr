@@ -143,10 +143,10 @@ read with `--source piano`:
   MusicXML writer emits them as chords.
 
 Current status: `p-001-s0` now has the correct 5 measures (the grand-staff
-barline test removed long stems mistaken for bars), 55 note events, and 12
-chords; the raw page previously produced 1 note.  The homr reference for this
-system has 44 note/chord elements and 14 chords, and the pitch agreement is
-about 0.67; ours is close but still less complete.  `p-050-s0` reads 32 note
+barline test removed long stems mistaken for bars), 60 note events (39
+note/chord elements, 12 chords); the raw page previously produced 1 note.  The
+homr reference for this system has 44 note/chord elements and 14 chords, and
+the pitch agreement is about 0.71; ours is close but still less complete.  `p-050-s0` reads 32 note
 elements over 8 measures.  Known gaps: clef changes inside a system are not
 followed (the bass staff switches to treble in the last measure of p-001-s0),
 voices are approximated by simultaneous onsets, and grand-staff deskewing is
