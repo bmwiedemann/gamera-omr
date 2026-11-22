@@ -253,8 +253,9 @@ def _distance_heads(ink: np.ndarray, space: float) -> list[tuple[float, float]]:
     for i in range(1, n):
         x, y, bw, bh, area = stats[i]
         if (0.35 * space <= bw <= 1.7 * space
-                and 0.25 * space <= bh <= 1.4 * space
-                and bw <= 2.2 * bh and area >= 0.25 * bw * bh):
+                and 0.25 * space <= bh <= 2.2 * space
+                and bw <= 2.2 * bh and area >= 0.25 * bw * bh
+                and (bh <= 1.4 * space or area >= 0.45 * bw * bh)):
             heads.append((float(cents[i][0]), float(cents[i][1])))
     return heads
 
