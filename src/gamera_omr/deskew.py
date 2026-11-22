@@ -636,6 +636,28 @@ def _aggregate(plans: list[BandSkew]) -> dict:
     }
 
 
+def _bounds_quality(bounds: list[tuple[float, float]],
+                    space: float) -> tuple[int, int, float]:
+    """Prefer segmentations whose measure widths are consistent.
+
+    A missed barline produces one very wide measure; a false one produces a
+    very narrow measure.  A single "measure" spanning the system is the
+    degenerate result of missing every barline.  This proxy has no truth and
+    works on both frames.
+    """
+    if not bounds:
+        return (10 ** 9, 0, 1e9)
+    widths = [b - a for a, b in bounds]
+    med = float(np.median(widths))
+    if med <= 0:
+        return (10 ** 9, 0, 1e9)
+    space = max(space, 1.0)
+    bad = sum(1 for w in widths
+               if w < 0.30 * med or w > 1.8 * med
+               or w < 2.0 * space or w > 28.0 * space)
+    return (bad, -len(bounds), float(np.std(widths) / med))
+
+
 def _summary(staves: list[Staff] | None, diag: dict | None,
              error: str | None = None) -> dict:
     if staves is None:
@@ -720,6 +742,9 @@ def deskew_page(
     arr = page.array()
     if initial_staves:
         pre = _summary(initial_staves, initial_diag)
+        pre_bounds = {staff.index: measure_bounds(staff,
+                                                 find_barlines(arr, staff))
+                      for staff in initial_staves}
         bands = find_system_bands(arr, staves=initial_staves, options=options)
         if len(bands) != len(initial_staves):
             return _rejected(page, initial_staves, [], "band_count_mismatch", pre)
@@ -764,6 +789,26 @@ def deskew_page(
                              pre, post)
         staff_diag = dict(initial_diag or {})
         staff_diag["staves"] = len(corrected)
+        # Barline detection needs the corrected line positions, but a bad
+        # correction can also miss bars.  Compare the raw-frame and
+        # corrected-frame segmentations per staff and keep the more regular
+        # one; x is unchanged by the shear, so either is usable.
+        corrected_arr = candidate.array()
+        post_bounds = [measure_bounds(staff, find_barlines(corrected_arr, staff))
+                       for staff in corrected]
+        pre_list = [pre_bounds.get(staff.index, []) for staff in corrected]
+
+        def page_quality(bounds_list):
+            qs = [_bounds_quality(b, s.space)
+                  for b, s in zip(bounds_list, corrected)]
+            return (sum(q[0] for q in qs),
+                    -sum(len(b) for b in bounds_list),
+                    sum(q[2] for q in qs))
+
+        chosen = (pre_list if page_quality(pre_list) < page_quality(post_bounds)
+                  else post_bounds)
+        corrected = [replace(staff, bounds=bounds)
+                     for staff, bounds in zip(corrected, chosen)]
         return DeskewResult(candidate, corrected, True, plans,
                             _deskew_diag(plans, applied=True, reason=None,
                                          pre=pre, post=post),
@@ -887,14 +932,6 @@ def prepare_page(
         pre_staves, pre_diag = find_staves(page, backend)
     except StaffFindError as exc:
         pre_error = str(exc)
-    if pre_staves is not None:
-        # The shear leaves x untouched; keep the pre-deskew measure bounds so
-        # barline detection cannot drift with the changed staff y values.
-        pre_arr = page.array()
-        for staff in pre_staves:
-            if not staff.bounds:
-                staff.bounds = measure_bounds(staff,
-                                              find_barlines(pre_arr, staff))
 
     result = deskew_page(page, backend=backend, initial_staves=pre_staves,
                          initial_diag=pre_diag, options=options)
