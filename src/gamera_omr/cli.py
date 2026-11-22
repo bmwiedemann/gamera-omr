@@ -11,9 +11,13 @@ from pathlib import Path
 
 from music21 import meter
 
-from . import classify, config, decode, glyphs, musicxml, notes, segments
-from .stacks import load_stack
-from .staffs import find_staves, remove_staff_lines
+from . import classify, config, decode, deskew, glyphs, musicxml, notes, segments
+from .staffs import remove_staff_lines
+
+
+def _prepare(args):
+    return deskew.prepare_page(args.image, backend=args.backend,
+                               enabled=not args.no_deskew)
 
 
 def _gamera_version() -> str:
@@ -27,9 +31,8 @@ def _gamera_version() -> str:
 
 def cmd_doctor(args) -> int:
     print(f"gamera {_gamera_version()}")
-    page = load_stack(args.image)
+    page, staves, diag = _prepare(args)
     print(f"page {page.path} {page.ncols}x{page.nrows} slots={len(page.slots)}")
-    staves, diag = find_staves(page, args.backend)
     print(json.dumps(diag, indent=2))
     for staff in staves:
         print(f"staff {staff.index}: lines={[round(y, 1) for y in staff.lines]} "
@@ -39,12 +42,13 @@ def cmd_doctor(args) -> int:
 
 
 def cmd_debug(args) -> int:
-    page = load_stack(args.image)
-    staves, diag = find_staves(page, args.backend)
+    page, staves, diag = _prepare(args)
     out = Path(args.out) if args.out else page.path.parent / f"{page.path.stem}-debug"
     out.mkdir(parents=True, exist_ok=True)
 
     binary = page.array()
+    if diag.get("deskew", {}).get("applied"):
+        segments.save_mask(binary, out / "00-deskew.png")
     segments.save_mask(binary, out / "01-binary.png")
 
     cleaned = remove_staff_lines(page, staves)
@@ -59,20 +63,19 @@ def cmd_debug(args) -> int:
         kept_all.extend(kept)
         barlines = segments.find_barlines(binary, staff)
         barlines_by_staff[staff.index] = barlines
-        bounds = segments.measure_bounds(staff, barlines)
+        bounds = staff.bounds or segments.measure_bounds(staff, barlines)
         print(f"staff {staff.index}: {len(kept)} components {dropped} "
               f"barlines={len(barlines)} measures={len(bounds)} "
               f"space={staff.space:.1f}")
 
     segments.save_overlay(page.path, staves, barlines_by_staff, kept_all,
-                          out / "03-overlay.png")
+                          out / "03-overlay.png", image=binary)
     print(f"backend={diag['backend']} wrote {out}")
     return 0
 
 
 def cmd_corpus(args) -> int:
-    page = load_stack(args.image)
-    staves, diag = find_staves(page, args.backend)
+    page, staves, diag = _prepare(args)
     items = glyphs.extract(page, staves)
     out = Path(args.out)
     glyphs.save_corpus(items, out)
@@ -95,14 +98,14 @@ def cmd_sheet(args) -> int:
 
 
 def cmd_notes(args) -> int:
-    page = load_stack(args.image)
-    staves, diag = find_staves(page, args.backend)
+    page, staves, diag = _prepare(args)
     out = Path(args.out) if args.out else page.path.parent / f"{page.path.stem}-notes"
     out.mkdir(parents=True, exist_ok=True)
     arr = page.array()
     for staff in staves:
         masks = notes.detect(arr, staff)
-        notes.overlay(page.path, staff, masks, out / f"notes-s{staff.index}.png")
+        notes.overlay(page.path, staff, masks, out / f"notes-s{staff.index}.png",
+                      image=arr)
         durations = " ".join(str(n.duration) for n in masks.notes)
         print(f"staff {staff.index}: {len(masks.notes)} heads  durations: {durations}")
     print(f"wrote {out}")
@@ -136,8 +139,7 @@ def default_model(source: str) -> Path:
 
 
 def cmd_read(args) -> int:
-    page = load_stack(args.image)
-    staves, diag = find_staves(page, args.backend)
+    page, staves, diag = _prepare(args)
     items = glyphs.extract(page, staves)
     with tempfile.TemporaryDirectory() as td:
         corpus = Path(td)
@@ -168,10 +170,13 @@ def cmd_read(args) -> int:
     tacet = set()
     bar = Fraction(meter.TimeSignature(time_signature).barDuration.quarterLength)
     for staff in staves:
-        barlines = segments.find_barlines(arr, staff)
-        bounds = segments.measure_bounds(staff, barlines)
+        if staff.bounds:
+            bounds = staff.bounds
+        else:
+            barlines = segments.find_barlines(arr, staff)
+            bounds = segments.measure_bounds(staff, barlines)
         bounds_all.extend(bounds)
-        if x_rhythm:
+        if x_rhythm and args.tacet_bars:
             for c in segments.find_rest_bars(all_comps, staff):
                 for i, (x0, x1) in enumerate(bounds):
                     if (x0 <= c.cx < x1
@@ -207,8 +212,7 @@ def cmd_read(args) -> int:
 
 def cmd_report(args) -> int:
     """Per-page reliability metrics; flags pages that need manual review."""
-    page = load_stack(args.image)
-    staves, diag = find_staves(page, args.backend)
+    page, staves, diag = _prepare(args)
     items = glyphs.extract(page, staves)
     with tempfile.TemporaryDirectory() as td:
         corpus = Path(td)
@@ -235,9 +239,12 @@ def cmd_report(args) -> int:
         _kept, dropped = segments.filter_components(all_comps, staff)
         drops[str(staff.index)] = dropped
         bars = segments.find_barlines(arr, staff)
-        bounds = segments.measure_bounds(staff, bars)
+        if staff.bounds:
+            bounds = staff.bounds
+        else:
+            bounds = segments.measure_bounds(staff, bars)
         bounds_all.extend(bounds)
-        if x_rhythm:
+        if x_rhythm and args.tacet_bars:
             for c in segments.find_rest_bars(all_comps, staff):
                 for i, (x0, x1) in enumerate(bounds):
                     if (x0 <= c.cx < x1
@@ -283,6 +290,16 @@ def cmd_report(args) -> int:
         flags.append("empty_measures")
     if not any(k.startswith("note.") for k in classes):
         flags.append("no_notes")
+    deskew_diag = diag.get("deskew", {})
+    skew_agg = deskew_diag.get("aggregate", {})
+    if (deskew_diag.get("enabled") and not deskew_diag.get("applied")
+            and deskew_diag.get("reason") not in (None, "below_threshold")):
+        flags.append("deskew_rejected")
+    if (skew_agg.get("max_residual_rms_px") or 0) > 1.5:
+        flags.append("deskew_high_residual")
+    if any(reason != "below_threshold"
+           for reason in skew_agg.get("reasons", {})):
+        flags.append("deskew_band_rejected")
 
     report = {
         "image": str(page.path), "source": args.source, "voice": args.voice,
@@ -290,7 +307,10 @@ def cmd_report(args) -> int:
         "model": str(Path(args.model) if args.model else default_model(args.source)),
         "staff": {"backend": diag.get("backend"), "count": len(staves),
                   "spaces": [round(s.space, 1) for s in staves],
-                  "oracle_mae": diag.get("oracle_mae"), "tried": diag.get("tried")},
+                  "oracle_mae": diag.get("oracle_mae"),
+                  "oracle_frame": diag.get("oracle_frame"),
+                  "tried": diag.get("tried")},
+        "deskew": deskew_diag,
         "glyphs": {"total": len(items), "classes": classes,
                    "mean_confidence": mean_conf,
                    "low_confidence": sum(1 for c in confidences if c < 0.75)},
@@ -313,18 +333,24 @@ def main(argv=None) -> int:
     p = sub.add_parser("doctor", help="check the build, staff finding and validation")
     p.add_argument("--image", required=True, help="stack PNG")
     p.add_argument("--backend", default="auto", choices=["auto", "projections", "miyao"])
+    p.add_argument("--no-deskew", action="store_true",
+                   help="do not correct per-system skew before processing")
     p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("debug", help="write staff/removal/segmentation overlays")
     p.add_argument("--image", required=True, help="stack PNG")
     p.add_argument("--out", help="output directory (default: next to the image)")
     p.add_argument("--backend", default="auto", choices=["auto", "projections", "miyao"])
+    p.add_argument("--no-deskew", action="store_true",
+                   help="do not correct per-system skew before processing")
     p.set_defaults(func=cmd_debug)
 
     p = sub.add_parser("corpus", help="extract glyphs from a stack page")
     p.add_argument("--image", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--backend", default="auto", choices=["auto", "projections", "miyao"])
+    p.add_argument("--no-deskew", action="store_true",
+                   help="do not correct per-system skew before processing")
     p.set_defaults(func=cmd_corpus)
 
     p = sub.add_parser("sheet", help="cluster a corpus and write a contact sheet")
@@ -340,6 +366,8 @@ def main(argv=None) -> int:
     p.add_argument("--image", required=True)
     p.add_argument("--out")
     p.add_argument("--backend", default="auto", choices=["auto", "projections", "miyao"])
+    p.add_argument("--no-deskew", action="store_true",
+                   help="do not correct per-system skew before processing")
     p.set_defaults(func=cmd_notes)
 
     p = sub.add_parser("train", help="train the kNN from a corpus and cluster labels")
@@ -362,6 +390,10 @@ def main(argv=None) -> int:
     p.add_argument("--movement", type=int, required=True)
     p.add_argument("--model")
     p.add_argument("--backend", default="auto", choices=["auto", "projections", "miyao"])
+    p.add_argument("--no-deskew", action="store_true",
+                   help="do not correct per-system skew before processing")
+    p.add_argument("--tacet-bars", action="store_true",
+                   help="treat a centred printed whole/half-rest bar as tacet")
     p.set_defaults(func=cmd_report)
 
     p = sub.add_parser("read", help="read a stack into MusicXML (Stage 1)")
@@ -373,6 +405,10 @@ def main(argv=None) -> int:
     p.add_argument("--no-dots", action="store_true",
                    help="do not apply dotted-note detection")
     p.add_argument("--backend", default="auto", choices=["auto", "projections", "miyao"])
+    p.add_argument("--no-deskew", action="store_true",
+                   help="do not correct per-system skew before processing")
+    p.add_argument("--tacet-bars", action="store_true",
+                   help="treat a centred printed whole/half-rest bar as tacet")
     p.add_argument("-o", "--out", required=True)
     p.set_defaults(func=cmd_read)
 
