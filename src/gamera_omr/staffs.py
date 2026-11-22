@@ -300,13 +300,56 @@ def _nearest_run(runs: list[tuple[int, int]], y: float, tolerance: float):
     return best
 
 
-def remove_staff_lines(page: StackPage, staves: list[Staff], tolerance: float = 1.0):
+def _repair_line_crossings(arr: np.ndarray, staff: Staff):
+    """Reconnect noteheads/stems split by erasing a staff line.
+
+    The run-length rule removes the line band through a notehead that sits on
+    a line, leaving its upper and lower halves as separate components.  Fill
+    the erased band only where both sides are wide enough to be a notehead,
+    so stems and beams are not merged.
+    """
+    h, w = arr.shape
+    half = max(1, int(round(staff.thickness / 2.0)) + 1)
+    min_width = max(2, int(round(0.30 * staff.space)))
+    x0 = max(0, int(np.floor(staff.left)))
+    x1 = min(w - 1, int(np.ceil(staff.right)))
+
+    def run_width(row: np.ndarray, x: int) -> int:
+        lo = x
+        while lo > 0 and row[lo - 1]:
+            lo -= 1
+        hi = x
+        while hi + 1 < len(row) and row[hi + 1]:
+            hi += 1
+        return hi - lo + 1
+
+    for y in staff.lines:
+        y = int(round(y))
+        top = y - half - 1
+        bottom = y + half + 1
+        if top < 0 or bottom >= h:
+            continue
+        for x in range(x0, x1 + 1):
+            if not (arr[top, x] and arr[bottom, x]):
+                continue
+            if (run_width(arr[top], x) < min_width
+                    or run_width(arr[bottom], x) < min_width):
+                continue
+            arr[top + 1:bottom, x] = 1
+
+
+def remove_staff_lines(page: StackPage, staves: list[Staff], tolerance: float = 1.0,
+                       *, repair: bool = False):
     """Return a new image with the staff lines removed.
 
     A column's black run is erased when it is no thicker than the line plus
     tolerance.  Thicker runs (noteheads, clefs, stems, barlines) keep their
     non-line pixels; runs spanning most of the staff (barlines, stems) are left
     untouched.
+
+    `repair=True` reconnects noteheads cut by the erased line.  It helps the
+    old prints, where heads sit on thick lines, but slightly harms the clean
+    NBA engravings, so callers choose it per edition.
     """
     arr = page.array().copy()
     for staff in staves:
@@ -333,4 +376,7 @@ def remove_staff_lines(page: StackPage, staves: list[Staff], tolerance: float = 
                     lo = max(a, int(round(y - thick / 2)))
                     hi = min(b, int(round(y + thick / 2)))
                     column[lo:hi + 1] = 0
+    for staff in staves:
+        if repair:
+            _repair_line_crossings(arr, staff)
     return from_array(arr, page)

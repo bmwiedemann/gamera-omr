@@ -140,7 +140,10 @@ def default_model(source: str) -> Path:
 
 def cmd_read(args) -> int:
     page, staves, diag = _prepare(args)
-    items = glyphs.extract(page, staves)
+    legacy = not args.source.startswith("nba")
+    repair = ((args.source == "sibley" or args.repair_crossings)
+              and not args.no_repair_crossings)
+    items = glyphs.extract(page, staves, repair=repair)
     with tempfile.TemporaryDirectory() as td:
         corpus = Path(td)
         glyphs.save_corpus(items, corpus)
@@ -151,9 +154,8 @@ def cmd_read(args) -> int:
     fifths = config.key_fifths(args.movement) or 0
     time_signature = config.time_signature(args.movement)
     arr = page.array()
-    legacy = not args.source.startswith("nba")
     x_rhythm = args.source in ("rosler", "sibley")
-    cleaned = remove_staff_lines(page, staves)
+    cleaned = remove_staff_lines(page, staves, repair=repair)
     all_comps = segments.components(cleaned.image)
     dots = []
     if not args.no_dots:
@@ -213,7 +215,10 @@ def cmd_read(args) -> int:
 def cmd_report(args) -> int:
     """Per-page reliability metrics; flags pages that need manual review."""
     page, staves, diag = _prepare(args)
-    items = glyphs.extract(page, staves)
+    legacy = not args.source.startswith("nba")
+    repair = ((args.source == "sibley" or args.repair_crossings)
+              and not args.no_repair_crossings)
+    items = glyphs.extract(page, staves, repair=repair)
     with tempfile.TemporaryDirectory() as td:
         corpus = Path(td)
         glyphs.save_corpus(items, corpus)
@@ -221,13 +226,12 @@ def cmd_report(args) -> int:
         predictions = classify.predict(model, corpus)
 
     arr = page.array()
-    cleaned = remove_staff_lines(page, staves)
+    cleaned = remove_staff_lines(page, staves, repair=repair)
     all_comps = segments.components(cleaned.image)
     clef = config.clef(args.source, args.voice)
     fifths = config.key_fifths(args.movement) or 0
     time_signature = config.time_signature(args.movement)
     bar = Fraction(meter.TimeSignature(time_signature).barDuration.quarterLength)
-    legacy = not args.source.startswith("nba")
     x_rhythm = args.source in ("rosler", "sibley")
 
     events: list = []
@@ -394,6 +398,10 @@ def main(argv=None) -> int:
                    help="do not correct per-system skew before processing")
     p.add_argument("--tacet-bars", action="store_true",
                    help="treat a centred printed whole/half-rest bar as tacet")
+    p.add_argument("--repair-crossings", action="store_true",
+                   help="rejoin noteheads split by staff-line removal")
+    p.add_argument("--no-repair-crossings", action="store_true",
+                   help="disable the Sibley notehead repair")
     p.set_defaults(func=cmd_report)
 
     p = sub.add_parser("read", help="read a stack into MusicXML (Stage 1)")
@@ -409,6 +417,10 @@ def main(argv=None) -> int:
                    help="do not correct per-system skew before processing")
     p.add_argument("--tacet-bars", action="store_true",
                    help="treat a centred printed whole/half-rest bar as tacet")
+    p.add_argument("--repair-crossings", action="store_true",
+                   help="rejoin noteheads split by staff-line removal")
+    p.add_argument("--no-repair-crossings", action="store_true",
+                   help="disable the Sibley notehead repair")
     p.add_argument("-o", "--out", required=True)
     p.set_defaults(func=cmd_read)
 

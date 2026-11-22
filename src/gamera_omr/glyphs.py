@@ -48,8 +48,9 @@ class Glyph:
         return (self.y0 + self.y1) / 2
 
 
-def extract(page, staves: list[Staff], page_name: str | None = None) -> list[Glyph]:
-    cleaned = remove_staff_lines(page, staves)
+def extract(page, staves: list[Staff], page_name: str | None = None,
+            *, repair: bool = False) -> list[Glyph]:
+    cleaned = remove_staff_lines(page, staves, repair=repair)
     comps = segments.components(cleaned.image)
     name = page_name or page.path.stem
     out = []
