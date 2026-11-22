@@ -35,9 +35,11 @@ It is not meant to replace homr.
 
 - `imp` → `importlib.util` (removed in 3.12)
 - old buffer API → `PyObject_GetBuffer` via `include/pycompat.hpp` (removed in 3.13)
-- `np.complex32` → `np.complex64` (removed in numpy 2)
+- legacy `io.py`: binary `np.fromstring`/`tostring()` → `frombuffer`/`tobytes()`
+  (removed in numpy 2); the never-existing `np.complex32` → `np.complex64`
 - `ndarray.tostring()` → `tobytes()` (removed in numpy 2)
-- MusicStaves finders: Python 3 integer division/slicing and dict methods
+- MusicStaves finders (projections, Miyao, Dalitz): Python 3 integer division/slicing
+  and dict methods
 
 `StaffFinder_dalitz` is not usable (its C++ plugin is absent from the ported tree);
 `StaffFinder_projections` and `StaffFinder_miyao` work and are what the engine uses.

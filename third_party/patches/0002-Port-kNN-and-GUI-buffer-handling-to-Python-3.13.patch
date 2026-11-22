@@ -1,21 +1,28 @@
-From 41847bdd18b03ef4c8f123ba620263627d3c8bea Mon Sep 17 00:00:00 2001
+From a3fdc635827409a86212f49bb2122d5d93de18c9 Mon Sep 17 00:00:00 2001
 From: "Bernhard M. Wiedemann" <bwiedemann@suse.de>
 Date: Sat, 21 Nov 2026 19:48:43 +0100
 Subject: [PATCH 2/5] Port kNN and GUI buffer handling to Python 3.13
 
 Python 3.13 removed the old buffer API: PyObject_CheckReadBuffer,
 PyObject_AsReadBuffer and PyObject_AsWriteBuffer.  Add
-include/pycompat.hpp, which maps those calls onto the buffer protocol
-(PyObject_CheckBuffer/PyObject_GetBuffer) on 3.13+ and leaves the old
-calls untouched on older Pythons.
+include/pycompat.hpp with copies of CPython's own 3.0-3.12
+implementations on top of PyObject_GetBuffer, and use them on every
+Python version so there is a single code path.
 
-Co-Authored-By: Claude Code <noreply@anthropic.com>
+GAMERA_PyObject_CheckReadBuffer probes PyBUF_SIMPLE like the original
+instead of only testing for a buffer slot (PyObject_CheckBuffer), so
+non-contiguous exporters are still rejected up front.
+
+gui_support's get_writable_buffer ignored AsWriteBuffer's result and
+then read an uninitialized pointer for read-only buffers; check it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 ---
  gamera-4/include/knnmodule.hpp           |  7 +--
- gamera-4/include/plugins/gui_support.hpp |  5 ++-
- gamera-4/include/pycompat.hpp            | 54 ++++++++++++++++++++++++
+ gamera-4/include/plugins/gui_support.hpp | 16 ++++---
+ gamera-4/include/pycompat.hpp            | 56 ++++++++++++++++++++++++
  gamera-4/src/knncore/knncoremodule.cpp   | 11 ++---
- 4 files changed, 67 insertions(+), 10 deletions(-)
+ 4 files changed, 77 insertions(+), 13 deletions(-)
  create mode 100644 gamera-4/include/pycompat.hpp
 
 diff --git a/gamera-4/include/knnmodule.hpp b/gamera-4/include/knnmodule.hpp
@@ -46,7 +53,7 @@ index 8178602..8e4cffb 100644
  		return -1;
  	}
 diff --git a/gamera-4/include/plugins/gui_support.hpp b/gamera-4/include/plugins/gui_support.hpp
-index 1f7388e..fa97e62 100644
+index 1f7388e..853881c 100644
 --- a/gamera-4/include/plugins/gui_support.hpp
 +++ b/gamera-4/include/plugins/gui_support.hpp
 @@ -22,6 +22,7 @@
@@ -57,26 +64,35 @@ index 1f7388e..fa97e62 100644
  #include "gamera.hpp"
  #include "vigra/resizeimage.hxx"
  #include "image_utilities.hpp"
-@@ -209,11 +210,11 @@ PyObject* to_string(T& m) {
+@@ -209,12 +210,17 @@ PyObject* to_string(T& m) {
  }
  
  static char *get_writable_buffer(PyObject *py_buffer, size_t nrows, size_t ncols) {
 -	if (PyObject_CheckReadBuffer(py_buffer) == 1) {
 +	if (GAMERA_PyObject_CheckReadBuffer(py_buffer) == 1) {
  		// Old Buffer Protocol
- 		char *buffer;
- 		Py_ssize_t buffer_len;
+-		char *buffer;
+-		Py_ssize_t buffer_len;
 -		PyObject_AsWriteBuffer(py_buffer, (void **)&buffer, &buffer_len);
-+		GAMERA_PyObject_AsWriteBuffer(py_buffer, (void **)&buffer, &buffer_len);
- 		
+-		
++		char *buffer = nullptr;
++		Py_ssize_t buffer_len = 0;
++		if (GAMERA_PyObject_AsWriteBuffer(py_buffer, (void **)&buffer, &buffer_len) < 0) {
++			// e.g. a read-only bytes object; buffer would be uninitialized
++			PyErr_Clear();
++			printf("The buffer passed to to_buffer is not writable.\n");
++			return nullptr;
++		}
++
  		if ((size_t)buffer_len != nrows * ncols * 3 || buffer == nullptr) {
  			printf("The image passed to to_buffer is not of the correct size.\n");
+ 			return nullptr;
 diff --git a/gamera-4/include/pycompat.hpp b/gamera-4/include/pycompat.hpp
 new file mode 100644
-index 0000000..b42db6e
+index 0000000..b39ca93
 --- /dev/null
 +++ b/gamera-4/include/pycompat.hpp
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,56 @@
 +#ifndef GAMERA_PYCOMPAT_HPP
 +#define GAMERA_PYCOMPAT_HPP
 +
@@ -86,22 +102,26 @@ index 0000000..b42db6e
 + * Python 3.13 removed the old (pre-PEP 3118) buffer API:
 + *   PyObject_CheckReadBuffer, PyObject_AsReadBuffer, PyObject_AsWriteBuffer.
 + *
-+ * Gamera's kNN and GUI code still uses it.  On older Pythons keep the
-+ * original calls; on 3.13+ map them onto the buffer protocol.
++ * Gamera's kNN and GUI code still uses it.  These are copies of CPython's own
++ * Python 3.0-3.12 implementations (Objects/abstract.c), so behaviour is the
++ * same on every Python version and one code path is used everywhere.
++ *
++ * As with the originals, the buffer is released before returning: the
++ * pointer stays valid only while the exporter is alive and is not resized.
 + */
-+
-+#if PY_VERSION_HEX < 0x030D0000
-+
-+#define GAMERA_PyObject_CheckReadBuffer(o) PyObject_CheckReadBuffer(o)
-+#define GAMERA_PyObject_AsReadBuffer(o, b, l) PyObject_AsReadBuffer((o), (b), (l))
-+#define GAMERA_PyObject_AsWriteBuffer(o, b, l) PyObject_AsWriteBuffer((o), (b), (l))
-+
-+#else
 +
 +static inline int
 +GAMERA_PyObject_CheckReadBuffer(PyObject *obj)
 +{
-+    return PyObject_CheckBuffer(obj);
++    Py_buffer view;
++    if (!PyObject_CheckBuffer(obj))
++        return 0;
++    if (PyObject_GetBuffer(obj, &view, PyBUF_SIMPLE) < 0) {
++        PyErr_Clear();
++        return 0;
++    }
++    PyBuffer_Release(&view);
++    return 1;
 +}
 +
 +static inline int
@@ -127,8 +147,6 @@ index 0000000..b42db6e
 +    PyBuffer_Release(&view);
 +    return 0;
 +}
-+
-+#endif
 +
 +#endif /* GAMERA_PYCOMPAT_HPP */
 diff --git a/gamera-4/src/knncore/knncoremodule.cpp b/gamera-4/src/knncore/knncoremodule.cpp

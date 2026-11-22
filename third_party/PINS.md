@@ -14,11 +14,11 @@ Applied as `third_party/patches/000*.patch`:
 
 | commit | subject |
 |---|---|
-| `9ed9de4` | Port paths to importlib (imp was removed in Python 3.12) |
-| `41847bd` | Port kNN and GUI buffer handling to Python 3.13 |
-| `766498c` | Use np.complex64 instead of the removed np.complex32 alias |
-| `b528fd7` | Port the staff finders to Python 3 integer semantics |
-| `c0dc965` | Use ndarray.tobytes() in numpy_io (tostring was removed in numpy 2) |
+| `e5341e7` | Port paths to importlib (imp was removed in Python 3.12) |
+| `a3fdc63` | Port kNN and GUI buffer handling to Python 3.13 |
+| `a1c3a1f` | Port the legacy io.py array readers/writers to numpy 2 |
+| `5cb9dee` | Port the staff finders to Python 3 integer semantics |
+| `799aef9` | Use ndarray.tobytes() in numpy_io (tostring was removed in numpy 2) |
 
 Build/test status on 2026-11-21 with Python 3.13.14, numpy 2.5.5, gcc 16.2:
 

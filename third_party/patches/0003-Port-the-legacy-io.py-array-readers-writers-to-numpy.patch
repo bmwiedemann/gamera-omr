@@ -1,0 +1,108 @@
+From a1c3a1f054b975318dc83550fe271c7838251cfd Mon Sep 17 00:00:00 2001
+From: "Bernhard M. Wiedemann" <bwiedemann@suse.de>
+Date: Sat, 21 Nov 2026 19:48:43 +0100
+Subject: [PATCH 3/5] Port the legacy io.py array readers/writers to numpy 2
+
+numpy 2 removed binary-mode np.fromstring() and ndarray.tostring(),
+which every BRIK/bget/bput reader and writer in io.py uses.
+
+- np.fromstring(buf, t) -> np.frombuffer(buf, t).copy(); the copy keeps
+  the result writable like fromstring's (getafniparam swaps shp in place).
+- ndarray.tostring() -> tobytes() (available since numpy 1.9).
+- AFNI BRICK_TYPES 5 (complex) used np.complex32, which numpy never
+  had, so that branch always raised AttributeError.  Use np.complex64
+  (two float32).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ gamera-4/gamera/io.py | 18 +++++++++---------
+ 1 file changed, 9 insertions(+), 9 deletions(-)
+
+diff --git a/gamera-4/gamera/io.py b/gamera-4/gamera/io.py
+index dd2b8f6..17d25fb 100644
+--- a/gamera-4/gamera/io.py
++++ b/gamera-4/gamera/io.py
+@@ -501,7 +501,7 @@ Usage:  brikget(imfile,unpackstr=np.int16,shp=None)  default shp: (-1,48,61,51)
+                 elif first5[0] == 3:
+                     unpackstr = np.float32
+                 elif first5[0] == 5:
+-                    unpackstr = np.complex32
++                    unpackstr = np.complex64  # AFNI complex: two float32
+         dims.reverse()
+         shp = [-1]+dims
+     except IOError:
+@@ -515,7 +515,7 @@ Usage:  brikget(imfile,unpackstr=np.int16,shp=None)  default shp: (-1,48,61,51)
+     bdata = file.read()
+ 
+     # the > forces big-endian (for or from Sun/SGI)
+-    bdata = np.fromstring(bdata,unpackstr)
++    bdata = np.frombuffer(bdata,unpackstr).copy()
+ #    littleEndian = ( struct.pack('i',1)==struct.pack('<i',1) )
+     if (max(bdata)>1e30):
+         bdata = bdata.byteswap()
+@@ -591,7 +591,7 @@ Usage:   mghbget(imfile, numslices=-1, xsize=64, ysize=64,
+     if numpixels%1 != 0:
+         raise ValueError("Incorrect file size in fmri.bget()")
+     else:  # the > forces big-endian (for or from Sun/SGI)
+-        bdata = np.fromstring(bdata,unpackstr)
++        bdata = np.frombuffer(bdata,unpackstr).copy()
+ #        littleEndian = ( struct.pack('i',1)==struct.pack('<i',1) )
+ #        if littleEndian:
+ #            bdata = bdata.byteswap()
+@@ -628,7 +628,7 @@ Returns: flat array of floats, or ints (if btype=np.int16)
+ """
+     file = open(fname,'rb')
+     bdata = file.read()
+-    bdata = np.fromstring(bdata,btype)
++    bdata = np.frombuffer(bdata,btype).copy()
+ #    littleEndian = ( struct.pack('i',1)==struct.pack('<i',1) )
+ #    if littleEndian:
+ #        bdata = bdata.byteswap()  # didn't used to need this with '>' above
+@@ -655,7 +655,7 @@ Returns: array of 'btype elements with shape 'shape', suitable for im.ashow()
+     f = open(fname,'rb')
+     shp = f.read(8)
+     f.close()
+-    shp = np.fromstring(shp,np.int32)
++    shp = np.frombuffer(shp,np.int32).copy()
+     shp[0],shp[1] = shp[1],shp[0]
+     try:
+         carray = np.reshape(d,shp)
+@@ -711,7 +711,7 @@ Save a file for use in matlab.
+ """
+     outarray = np.transpose(outarray)
+     outdata = np.ravel(outarray).astype(btype)
+-    outdata = outdata.tostring()
++    outdata = outdata.tobytes()
+     outfile = open(fname,'wb')
+     outfile.write(outdata)
+     outfile.close()
+@@ -751,7 +751,7 @@ Usage:   bput (outarray,filename,writeheader=0,packtype=np.int16,writetype='wb')
+ #    littleEndian = ( struct.pack('i',1)==struct.pack('<i',1) )
+ #    if littleEndian:
+ #        outdata = outdata.byteswap()
+-    outdata = outdata.tostring()
++    outdata = outdata.tobytes()
+     outfile = open(fname,writetype)
+     outfile.write(outdata)
+     outfile.close()
+@@ -1030,7 +1030,7 @@ Returns: data in file fname of type btype
+     if not btype:
+         btype = fname[-4]
+     try:
+-        bdata = np.fromstring(bdata,btype)
++        bdata = np.frombuffer(bdata,btype).copy()
+     except Exception:
+         raise ValueError("Bad unpacking type.")
+ 
+@@ -1079,7 +1079,7 @@ Usage:  binput(outarray,filename,packtype=None,writetype='wb')
+     # force the data on disk to be little_endian (for more efficient PC/Linux use)
+     if not np.little_endian:
+         outdata = outdata.byteswap()
+-    outdata = outdata.tostring()
++    outdata = outdata.tobytes()
+     outfile = open(fname,writetype)
+     outfile.write(outdata)
+     outfile.close()
+-- 
+2.56.0
+
