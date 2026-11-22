@@ -14,14 +14,15 @@ resampling.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import cv2
 import numpy as np
 
 from .stacks import StackPage, from_array, load_stack
-from .staffs import Staff, StaffFindError, find_staves
+from .staffs import Staff, StaffFindError, find_staves, validate_staves
+from .segments import find_barlines, measure_bounds
 
 
 @dataclass(frozen=True)
@@ -30,8 +31,8 @@ class DeskewOptions:
     merge_gap: int = 48           # blank gap still belonging to one system
     min_band_height: int = 40     # px; drops lyric/text slivers
     max_bands: int = 6
-    min_edge_spaces: float = 0.20  # auto no-op guard (NBA is below this)
-    min_edge_px: float = 1.5
+    min_edge_spaces: float = 0.30  # auto no-op guard (NBA is below this)
+    min_edge_px: float = 3.0
     max_angle_deg: float = 1.5
     max_edge_spaces: float = 2.5
     max_curvature_spaces: float = 0.75
@@ -228,11 +229,24 @@ def _open_profile(sub: np.ndarray, space: float) -> tuple[np.ndarray, np.ndarray
     Staff lines survive the opening even when slightly sloped; stems and
     most noteheads are narrower than the kernel.
     """
-    k = max(3, int(round(1.2 * space)))
+    k = max(3, int(round(0.35 * space)))
     k = min(k, max(3, sub.shape[1] - 1))
     kernel = np.ones((1, k), dtype=np.uint8)
     opened = cv2.morphologyEx(sub.astype(np.uint8), cv2.MORPH_OPEN, kernel)
     return opened, opened.sum(axis=1).astype(float)
+
+
+def _comb_candidates(prof: np.ndarray, lag: int,
+                     min_peak_fraction: float) -> list[list[int]]:
+    """Five-line arithmetic progressions that are all strong in `prof`."""
+    out = []
+    threshold = min_peak_fraction * prof.max()
+    for start in range(0, len(prof) - 4 * lag):
+        idxs = [start + k * lag for k in range(5)]
+        if any(prof[i] < threshold for i in idxs):
+            continue
+        out.append(idxs)
+    return out
 
 
 def strip_line_centers(
@@ -264,29 +278,34 @@ def strip_line_centers(
         if prof.max() <= 0:
             continue
         peaks: list[float] = []
+        combs = _comb_candidates(prof, lag, min_peak_fraction)
         if staff is not None:
-            for line in staff.lines:
-                pred = line - band.y0 + coarse_slope * (xc - x_ref)
-                lo = max(0, int(np.floor(pred - half)))
-                hi = min(len(prof) - 1, int(np.ceil(pred + half)))
-                if hi < lo or prof[lo:hi + 1].max() < min_peak_fraction * prof.max():
-                    peaks.append(float("nan"))
-                    continue
-                peaks.append(float(lo + int(np.argmax(prof[lo:hi + 1]))))
+            predicted = [line - band.y0 + coarse_slope * (xc - x_ref)
+                         for line in staff.lines]
+            if combs:
+                # The row-projection finder biases line y on strongly skewed
+                # systems.  Pick the comb nearest the predicted staff, so a
+                # constant offset is tolerated but line identity comes from
+                # the actual five-line pattern.
+                comb = min(combs, key=lambda idxs: sum(
+                    abs(idxs[k] - predicted[k]) for k in range(5)))
+                if max(abs(comb[k] - predicted[k]) for k in range(5)) <= 0.9 * space:
+                    peaks = [float(i) for i in comb]
+            if not peaks:
+                for line in staff.lines:
+                    pred = line - band.y0 + coarse_slope * (xc - x_ref)
+                    lo = max(0, int(np.floor(pred - half)))
+                    hi = min(len(prof) - 1, int(np.ceil(pred + half)))
+                    if (hi < lo
+                            or prof[lo:hi + 1].max() < min_peak_fraction * prof.max()):
+                        peaks.append(float("nan"))
+                        continue
+                    peaks.append(float(lo + int(np.argmax(prof[lo:hi + 1]))))
         else:
-            best: tuple[float, list[int]] | None = None
-            for phase in range(lag):
-                idxs = [phase + k * lag for k in range(5) if phase + k * lag < len(prof)]
-                if len(idxs) < 5:
-                    break
-                score = float(sum(prof[i] for i in idxs))
-                if best is None or score > best[0]:
-                    best = (score, idxs)
-            if best is None:
+            if not combs:
                 continue
-            if any(prof[i] < min_peak_fraction * prof.max() for i in best[1]):
-                continue
-            peaks = [float(i) for i in best[1]]
+            comb = max(combs, key=lambda idxs: sum(prof[i] for i in idxs))
+            peaks = [float(i) for i in comb]
         xs.append(xc)
         ys.append(peaks)
     xs_arr = np.asarray(xs, dtype=float)
@@ -487,7 +506,7 @@ def _finalize(plan: BandSkew, options: DeskewOptions) -> BandSkew:
     plan.curvature_px = float(abs(c[1] - 0.5 * (c[0] + c[2])))
     plan.angle_deg = float(np.degrees(np.arctan(plan.slope)))
     if (plan.edge_deviation_spaces < options.min_edge_spaces
-            and plan.edge_deviation_px < options.min_edge_px):
+            or plan.edge_deviation_px < options.min_edge_px):
         plan.applied = False
         plan.reason = "below_threshold"
     elif abs(plan.angle_deg) > options.max_angle_deg:
@@ -539,6 +558,15 @@ def fit_band_skew(
     if trajectory is None:
         return coarse
     if not 0.75 * space <= trajectory.space <= 1.25 * space:
+        return coarse
+    intercepts = sorted(fit.intercept for fit in trajectory.line_fits)
+    span = intercepts[-1] - intercepts[0]
+    gaps = np.diff(intercepts)
+    if (len(intercepts) != 5 or not 3.4 * space <= span <= 4.6 * space
+            or gaps.min() < 0.6 * space or gaps.max() > 1.4 * space):
+        # A wrong coarse angle can make a strip lock onto the neighbouring
+        # line; the resulting intercepts then collapse or jump.  Keep the
+        # coarse projection plan rather than trusting the line identities.
         return coarse
     plan = BandSkew(
         band=band, x_ref=x_ref, space=trajectory.space,
@@ -693,9 +721,12 @@ def deskew_page(
     if initial_staves:
         pre = _summary(initial_staves, initial_diag)
         bands = find_system_bands(arr, staves=initial_staves, options=options)
-        plans = [fit_band_skew(arr, band, staff=staff, options=options)
-                 for band, staff in zip(bands, initial_staves)]
-        plans = [p for p in plans if p is not None]
+        plans_by_staff: dict[int, BandSkew] = {}
+        for band, staff in zip(bands, initial_staves):
+            plan = fit_band_skew(arr, band, staff=staff, options=options)
+            if plan is not None:
+                plans_by_staff[staff.index] = plan
+        plans = list(plans_by_staff.values())
         if not plans:
             return _rejected(page, initial_staves, [], "no_fit", pre)
         if not any(p.applied for p in plans):
@@ -704,25 +735,37 @@ def deskew_page(
             candidate = apply_shear(page, plans)
         except ValueError:
             return _rejected(page, initial_staves, plans, "bands_overlap", pre)
-        try:
-            post_staves, post_diag = find_staves(candidate, backend,
-                                                 allow_oracle=False)
-        except StaffFindError as exc:
+
+        # Keep the finder/oracle x extents and update only the line positions
+        # from the fitted intercepts.  Re-running the finder on the corrected
+        # page would change extents and measure segmentation for no reason.
+        corrected: list[Staff] = []
+        for staff in initial_staves:
+            plan = plans_by_staff.get(staff.index)
+            if plan is not None and len(plan.line_fits) == 5:
+                ys = sorted(fit.intercept + plan.band.y0
+                            for fit in plan.line_fits)
+                measured = float(np.median(np.diff(ys)))
+                if 0.75 * staff.space <= measured <= 1.25 * staff.space:
+                    corrected.append(replace(staff, lines=ys, space=measured))
+                    continue
+            corrected.append(staff)
+        ok, reasons = validate_staves(corrected, candidate.image)
+        post = _summary(corrected, initial_diag)
+        if not ok:
+            post["reasons"] = reasons
             return _rejected(page, initial_staves, plans,
-                             "staff_finding_failed_after_deskew", pre,
-                             {"error": str(exc)})
-        post = _summary(post_staves, post_diag)
-        if len(post_staves) != len(initial_staves):
-            return _rejected(page, initial_staves, plans, "staff_count_changed",
-                             pre, post)
-        post_plans = _post_quality(candidate.array(), post_staves, options)
+                             "validation_regressed_after_deskew", pre, post)
+        post_plans = _post_quality(candidate.array(), corrected, options)
         if not _accepted(plans, post_plans):
             return _rejected(page, initial_staves, plans, "post_quality_regressed",
                              pre, post)
-        return DeskewResult(candidate, post_staves, True, plans,
+        staff_diag = dict(initial_diag or {})
+        staff_diag["staves"] = len(corrected)
+        return DeskewResult(candidate, corrected, True, plans,
                             _deskew_diag(plans, applied=True, reason=None,
                                          pre=pre, post=post),
-                            post_diag)
+                            staff_diag)
 
     return _deskew_without_staves(page, backend, options)
 
@@ -842,6 +885,14 @@ def prepare_page(
         pre_staves, pre_diag = find_staves(page, backend)
     except StaffFindError as exc:
         pre_error = str(exc)
+    if pre_staves is not None:
+        # The shear leaves x untouched; keep the pre-deskew measure bounds so
+        # barline detection cannot drift with the changed staff y values.
+        pre_arr = page.array()
+        for staff in pre_staves:
+            if not staff.bounds:
+                staff.bounds = measure_bounds(staff,
+                                              find_barlines(pre_arr, staff))
 
     result = deskew_page(page, backend=backend, initial_staves=pre_staves,
                          initial_diag=pre_diag, options=options)

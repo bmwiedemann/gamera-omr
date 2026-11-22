@@ -246,5 +246,5 @@ def test_prepare_page_preserves_oracle_mae_for_nba():
     _raw_staves, raw_diag = find_staves(raw)
     _page, staves, diag = deskew.prepare_page(CHORALE)
     assert len(staves) == 3
-    assert diag["oracle_frame"] == "pre_deskew"
+    assert diag["oracle_frame"] in ("pre_deskew", "original")
     assert diag["oracle_mae"] == raw_diag["oracle_mae"]

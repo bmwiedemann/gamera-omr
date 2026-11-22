@@ -34,6 +34,9 @@ class Staff:
     thickness: float
     backend: str = ""
     reasons: list[str] = field(default_factory=list)
+    # Measure x-bounds computed before a deskew; x is unchanged by a vertical
+    # shear, so reusing them keeps measure segmentation stable.
+    bounds: list[tuple[float, float]] = field(default_factory=list)
 
     @property
     def top(self) -> float:
