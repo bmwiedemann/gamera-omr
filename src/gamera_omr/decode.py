@@ -98,6 +98,20 @@ def pitch_at(staff: Staff, clef: str, position: int, fifths: int = 0):
     return p
 
 
+def _has_flag(ink: np.ndarray, space: float) -> bool:
+    """True when a filled note's stem carries a flag (an eighth note)."""
+    a, _b = head_region(ink, space)
+    if a <= 2:
+        return False
+    top = ink[:a, :]
+    cols = np.flatnonzero(top.any(axis=0))
+    if len(cols) == 0:
+        return False
+    # A quarter-note stem is one or two pixels wide; a flag is a curved
+    # stroke spanning a good fraction of a staff space.
+    return (cols[-1] - cols[0] + 1) >= 0.55 * space
+
+
 def duration_for(label: str, ink: np.ndarray, space: float,
                  legacy: bool = False) -> Fraction | None:
     if label not in ("note.black", "note.open"):
@@ -113,6 +127,8 @@ def duration_for(label: str, ink: np.ndarray, space: float,
     has_stem = ink.shape[0] > 2.2 * space
     if open_head:
         return Fraction(4) if not has_stem else Fraction(2)
+    if _has_flag(ink, space):
+        return Fraction(1, 2)
     return Fraction(1)
 
 
@@ -178,10 +194,13 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
         duration = duration_for(label, g.ink, g.space, legacy=legacy)
         if duration is None:
             # A notehead merged with a slur/fermata is classified slur/text;
-            # the tall narrow glyph still contains the head.
-            if label in ("slur", "text") and g.h >= 2.2 * g.space and g.w <= 1.6 * g.space:
+            # the tall narrow glyph still contains the head.  A bare stem or
+            # barline is also text and is only a few pixels wide, so require a
+            # head-sized horizontal extent before recovering a note.
+            if (label in ("slur", "text") and g.h >= 2.2 * g.space
+                    and 0.6 * g.space <= g.w <= 1.6 * g.space):
                 fill, cy, h, w = head_fill(g.ink, g.space)
-                if w >= 0.4 * g.space and h >= 0.25 * g.space:
+                if (w >= 0.6 * g.space and 0.25 * g.space <= h <= 2.0 * g.space):
                     # merged slurs/fermatas hide the head outline; these are
                     # the half/quarter notes whose head was cut by the slur
                     duration = Fraction(1) if fill >= 0.75 else Fraction(2)
@@ -237,32 +256,58 @@ def apply_dots(events: list[Event], dots: list[tuple[float, float]], space: floa
 
 def assign_onsets_from_x(events: list[Event], bounds: list[tuple[float, float]],
                          bar_length: Fraction,
-                         grid: Fraction = Fraction(1, 4)) -> list[Event]:
+                         grid: Fraction = Fraction(1, 4),
+                         anchor: bool = True) -> list[Event]:
     """Place notes by their printed x position, fill the gaps with rests.
 
     The horizontal position of a notehead is a reliable rhythm cue even when
-    the rest glyphs are missed (or the edition prints them unusually).  The
-    glyph duration caps the note; any remaining gap becomes a rest.
+    the rest glyphs are missed (or the edition prints them unusually).  Notes
+    are interpolated between the first and last notehead rather than across
+    the full barline-to-barline width, because printed measures carry left
+    (clef/rest) and right margins that otherwise shift every onset.  Detected
+    leading/trailing rests anchor the interpolation; the glyph duration caps
+    the note and any remaining gap becomes a rest.
     """
     by_measure: dict[int, list[Event]] = {i: [] for i in range(len(bounds))}
     for event in events:
-        if event.kind == "note":
-            by_measure[event.measure].append(event)
+        by_measure[event.measure].append(event)
     out = []
     for measure, (x0, x1) in enumerate(bounds):
-        notes = sorted(by_measure[measure], key=lambda e: e.x)
+        items = by_measure[measure]
+        notes = sorted((e for e in items if e.kind == "note"),
+                       key=lambda e: e.x)
+        rests = [e for e in items if e.kind == "rest"]
         if not notes:
-            rest = next((e for e in events
-                         if e.measure == measure and e.kind == "rest"), None)
-            out.append(rest or Event(measure, x0, None, bar_length, "rest"))
+            out.append(rests[0] if rests
+                       else Event(measure, x0, None, bar_length, "rest"))
             continue
-        span = max(1.0, float(x1 - x0))
         limit = bar_length - grid if bar_length >= grid else bar_length
-        onsets = []
-        for event in notes:
-            frac = Fraction((event.x - x0) / span).limit_denominator(64)
-            steps = round(frac * bar_length / grid)
-            onsets.append(min(max(Fraction(steps) * grid, Fraction(0)), limit))
+        x_first, x_last = notes[0].x, notes[-1].x
+        lead = sum((r.duration for r in rests if r.x < x_first),
+                   Fraction(0))
+        trail = sum((r.duration for r in rests if r.x > x_last),
+                    Fraction(0))
+        first = min(max(Fraction(0), lead), limit)
+        last_dur = notes[-1].duration
+        if last_dur is None or last_dur <= 0:
+            last_dur = grid
+        last = min(max(first, bar_length - trail - last_dur), limit)
+
+        onsets: list[Fraction] = []
+        if anchor and x_last > x_first and last > first:
+            span = float(x_last - x_first)
+            for event in notes:
+                frac = Fraction((event.x - x_first) / span).limit_denominator(64)
+                raw = first + frac * (last - first)
+                onsets.append(Fraction(round(raw / grid)) * grid)
+            onsets[0], onsets[-1] = first, last
+        else:
+            span = max(1.0, float(x1 - x0))
+            for event in notes:
+                frac = Fraction((event.x - x0) / span).limit_denominator(64)
+                raw = frac * bar_length
+                onsets.append(min(max(Fraction(round(raw / grid)) * grid,
+                                      Fraction(0)), limit))
         for i in range(1, len(onsets)):
             if onsets[i] <= onsets[i - 1]:
                 onsets[i] = min(onsets[i - 1] + grid, limit)

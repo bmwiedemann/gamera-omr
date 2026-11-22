@@ -15,9 +15,17 @@ from . import classify, config, decode, deskew, glyphs, musicxml, notes, segment
 from .staffs import remove_staff_lines
 
 
+def _flush_barlines(source) -> bool:
+    # Rösler draws its barlines flush with the staff; the Sibley/NBA prints
+    # have normal or extended barlines and lose measures with this relaxation.
+    return source == "rosler"
+
+
 def _prepare(args):
+    source = getattr(args, "source", None)
     return deskew.prepare_page(args.image, backend=args.backend,
-                               enabled=not args.no_deskew)
+                               enabled=not args.no_deskew,
+                               flush_barlines=_flush_barlines(source))
 
 
 def _gamera_version() -> str:
@@ -176,7 +184,7 @@ def cmd_read(args) -> int:
         if staff.bounds:
             bounds = staff.bounds
         else:
-            barlines = segments.find_barlines(arr, staff)
+            barlines = segments.find_barlines(arr, staff, flush=_flush_barlines(args.source))
             bounds = segments.measure_bounds(staff, barlines)
         bounds_all.extend(bounds)
         if x_rhythm and args.tacet_bars:
@@ -195,7 +203,8 @@ def cmd_read(args) -> int:
 
     events = decode.normalize_measures(events, offset, bar, tacet=tacet)
     if x_rhythm:
-        events = decode.assign_onsets_from_x(events, bounds_all, bar)
+        events = decode.assign_onsets_from_x(
+            events, bounds_all, bar, anchor=(args.source == "rosler"))
     else:
         decode.fit_durations(events, offset, bar)
         events = decode.assign_onsets(events, offset, bar)
@@ -243,7 +252,7 @@ def cmd_report(args) -> int:
     for staff in staves:
         _kept, dropped = segments.filter_components(all_comps, staff)
         drops[str(staff.index)] = dropped
-        bars = segments.find_barlines(arr, staff)
+        bars = segments.find_barlines(arr, staff, flush=_flush_barlines(args.source))
         if staff.bounds:
             bounds = staff.bounds
         else:
@@ -268,7 +277,8 @@ def cmd_report(args) -> int:
 
     events = decode.normalize_measures(events, offset, bar, tacet=tacet)
     if x_rhythm:
-        events = decode.assign_onsets_from_x(events, bounds_all, bar)
+        events = decode.assign_onsets_from_x(
+            events, bounds_all, bar, anchor=(args.source == "rosler"))
     else:
         decode.fit_durations(events, offset, bar)
         events = decode.assign_onsets(events, offset, bar)

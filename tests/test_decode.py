@@ -32,8 +32,10 @@ def test_onsets_and_gaps_from_x():
     out = decode.assign_onsets_from_x([a, b], [(0.0, 100.0)], Fraction(4))
     notes = [e for e in out if e.kind == "note"]
     rests = [e for e in out if e.kind == "rest"]
-    assert [e.onset for e in notes] == [Fraction(1, 2), Fraction(2)]
+    # The first and last noteheads anchor the measure: no leading rest, and
+    # the last note ends with the bar.
+    assert [e.onset for e in notes] == [Fraction(0), Fraction(3)]
     assert notes[0].duration == Fraction(1)
     assert sum(e.duration for e in out) == Fraction(4)
-    assert any(r.onset == 0 for r in rests)          # leading rest
-    assert any(r.onset == Fraction(3, 2) for r in rests)  # gap rest
+    assert any(r.onset == Fraction(1) and r.duration == Fraction(2)
+               for r in rests)
