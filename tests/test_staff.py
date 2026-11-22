@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from gamera_omr import config
-from gamera_omr.segments import find_barlines, measure_bounds
+from gamera_omr.segments import find_barlines, find_grand_barlines, measure_bounds
 from gamera_omr.stacks import load_stack
 from gamera_omr.staffs import Staff, find_staves, remove_staff_lines, validate_staves
 
@@ -87,9 +87,9 @@ def _barline_page(barline_end: int):
     for y in lines:
         arr[y:y + 2, 20:540] = 1
     arr[38:barline_end, 300:303] = 1          # real barline
-    arr[38:122, 420:422] = 1                  # long beamed stem
-    arr[38:42, 420:450] = 1                   # beam at its top
-    arr[112:122, 412:422] = 1                 # notehead at its bottom
+    arr[30:135, 420:422] = 1                  # long beamed stem
+    arr[28:35, 420:455] = 1                   # beam above the staff
+    arr[126:135, 412:422] = 1                 # notehead below the staff
     return staff, arr
 
 
@@ -98,6 +98,22 @@ def test_beamed_stem_is_not_a_barline():
     bars = find_barlines(arr, staff, flush_bottom=True, reject_stems=True)
     assert any(abs(b - 301) <= 1.5 for b in bars)
     assert not any(abs(b - 421) <= 1.5 for b in bars)
+
+
+def test_grand_barline_bridges_small_scan_gap():
+    upper = Staff(0, [40, 60, 80, 100, 120], left=20, right=560,
+                  space=20.0, thickness=2.0)
+    lower = Staff(1, [200, 220, 240, 260, 280], left=20, right=560,
+                  space=20.0, thickness=2.0)
+    arr = np.zeros((320, 600), np.uint8)
+    for y in upper.lines + lower.lines:
+        arr[y:y + 2, 20:560] = 1
+    arr[37:150, 300:303] = 1          # grand barline, broken by a 3 px gap
+    arr[153:283, 300:303] = 1
+    arr[37:283, 450:453] = 1          # continuous grand barline
+    bars = find_grand_barlines(arr, upper, lower)
+    assert any(abs(b - 301) <= 1.5 for b in bars)
+    assert any(abs(b - 451) <= 1.5 for b in bars)
 
 
 def test_flush_bottom_barline_option():

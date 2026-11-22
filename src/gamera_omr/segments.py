@@ -105,22 +105,23 @@ def find_rest_bars(comps: list[Component], staff: Staff) -> list[Component]:
     return bars
 
 
-def _attached_stroke(arr: np.ndarray, staff: Staff, x0: int, x1: int) -> bool:
-    """True when horizontal ink touches a full-height vertical candidate.
+def _attachment_score(arr: np.ndarray, staff: Staff, x0: int, x1: int) -> int:
+    """True when wide horizontal ink joins a full-height vertical candidate.
 
     A real barline is a bare vertical stroke.  A long stem of a beamed group
-    reaches the same height, but a notehead or beam joins it horizontally.
-    Staff lines are masked, and the search stays within half a staff space of
-    the staff, so rehearsal figures above and lyrics below cannot look like
-    attachments.
+    reaches the same height, but a beam or notehead joins it horizontally.
+    Only wide runs (a beam or a head) count, and they must cover at least
+    three rows: a slur or rehearsal figure touching a barline is thin or
+    narrow and must not discard the barline.  Staff lines are masked, and the
+    search stays within 2.5 staff spaces of the staff.
     """
-    margin = max(2, int(round(0.5 * staff.space)))
+    margin = max(2, int(round(2.5 * staff.space)))
     top = max(0, int(round(staff.top)) - margin)
     bottom = min(arr.shape[0] - 1, int(round(staff.bottom)) + margin)
     span = max(1, int(round(2.5 * staff.space)))
     lo = max(0, x0 - span)
     hi = min(arr.shape[1], x1 + span + 1)
-    need = (x1 - x0 + 1) + max(4, int(round(0.25 * staff.space)))
+    need = max(int(round(0.9 * staff.space)), (x1 - x0 + 1) + 6)
     masked = set()
     thickness = max(1, int(round(staff.thickness))) + 2
     for line in staff.lines:
@@ -134,6 +135,7 @@ def _attached_stroke(arr: np.ndarray, staff: Staff, x0: int, x1: int) -> bool:
         counts = arr[top:bottom + 1, x_left:x_right + 1].sum(axis=1)
         wide = np.flatnonzero(counts >= 0.6 * (x_right - x_left + 1))
         masked.update(int(row) + top for row in wide)
+    joined = 0
     for y in range(top, bottom + 1):
         if y in masked:
             continue
@@ -149,8 +151,11 @@ def _attached_stroke(arr: np.ndarray, staff: Staff, x0: int, x1: int) -> bool:
             stop = int(b) + lo
             if (stop >= x0 - 2 and start <= x1 + 2
                     and stop - start + 1 >= need):
-                return True
-    return False
+                joined += 1
+                break
+        if joined >= 3:
+            return 3
+    return joined
 
 
 def find_barlines(arr: np.ndarray, staff: Staff, loose: bool = False,
@@ -196,7 +201,7 @@ def find_barlines(arr: np.ndarray, staff: Staff, loose: bool = False,
         elif flush:
             lower = bot_off
         elif flush_bottom:
-            lower = bot_off + 1
+            lower = bot_off
         else:
             lower = bot_off + 2
         upper_start = (top_off + max(2, int(round(0.6 * staff.space)))
@@ -210,7 +215,7 @@ def find_barlines(arr: np.ndarray, staff: Staff, loose: bool = False,
             groups[-1].append(x)
         else:
             groups.append([x])
-    barlines = []
+    scored = []
     rejected = []
     start = staff.left + 5.0 * staff.space   # skip the clef/key signature zone
     for group in groups:
@@ -220,17 +225,49 @@ def find_barlines(arr: np.ndarray, staff: Staff, loose: bool = False,
             continue
         if centre < start:
             continue
-        if reject_stems and _attached_stroke(arr, staff, group[0], group[-1]):
-            rejected.append(centre)
+        score = (_attachment_score(arr, staff, group[0], group[-1])
+                 if reject_stems else 0)
+        if score >= 3:
+            rejected.append((centre, score))
             continue
-        barlines.append(centre)
+        scored.append((centre, score))
     # A double bar/repeat is two strokes a few pixels apart; one of them may
     # touch a note or beam.  Keep a rejected stroke when it belongs to such a
     # pair, so the incipit/double-bar handling still sees both.
-    for centre in rejected:
-        if any(abs(centre - kept) <= 2.2 * staff.space
-               for kept in barlines):
-            barlines.append(centre)
+    for centre, score in rejected:
+        if any(abs(centre - kept) <= 0.8 * staff.space
+               for kept, _score in scored):
+            scored.append((centre, score))
+    # A double bar/repeat can have both strokes touching beams (the opening
+    # incipit often does); keep such a close pair as one boundary.
+    restored = set()
+    for i, (centre, score) in enumerate(rejected):
+        for other, other_score in rejected[i + 1:]:
+            if abs(other - centre) <= 0.8 * staff.space:
+                for c, sc in ((centre, score), (other, other_score)):
+                    if c not in restored:
+                        scored.append((c, sc))
+                        restored.add(c)
+    # A system can open with a short pickup whose beam crosses the following
+    # barline.  Keep an attached stroke near the left edge when no other
+    # barline is close, or that first measure disappears.
+    for centre, score in list(rejected):
+        if (centre < staff.left + 10.0 * staff.space
+                and all(abs(centre - kept) > 4.0 * staff.space
+                        for kept, _score in scored)):
+            scored.append((centre, score))
+    # A stem close to a clean barline can pass the row threshold; when two
+    # strokes are close, keep the cleaner one.
+    barlines = []
+    for centre, score in scored:
+        if 0 < score < 3:
+            neighbours = [
+                other_score for other, other_score in scored
+                if other != centre and abs(other - centre) <= 6.0 * staff.space
+            ]
+            if neighbours and min(neighbours) < score:
+                continue
+        barlines.append(centre)
     return sorted(barlines)
 
 
@@ -248,19 +285,24 @@ def find_grand_barlines(arr: np.ndarray, upper: Staff, lower: Staff,
     x0 = max(0, int(round(min(upper.left, lower.left))))
     x1 = min(arr.shape[1] - 1, int(round(max(upper.right, lower.right))))
     space = max(upper.space, lower.space)
+    # A barline printed across the inter-staff gap is sometimes broken by a
+    # beam or a white speck; merge gaps smaller than 0.6 staff space.
+    gap = max(2, int(round(0.6 * space)))
+    start_margin = max(6, int(round(0.4 * space)))
+    end_margin = max(7, int(round(0.5 * space)))
     candidates = []
     for x in range(x0, x1 + 1):
         column = arr[top:bottom + 1, x]
         idx = np.flatnonzero(column)
         if len(idx) == 0:
             continue
-        breaks = np.flatnonzero(np.diff(idx) > 1)
+        breaks = np.flatnonzero(np.diff(idx) > gap)
         starts = np.r_[idx[0], idx[breaks + 1]]
         ends = np.r_[idx[breaks], idx[-1]]
         k = int(np.argmax(ends - starts + 1))
         if ends[k] - starts[k] + 1 < min_coverage * need:
             continue
-        if starts[k] > 6 or ends[k] < need - 7:
+        if starts[k] > start_margin or ends[k] < need - end_margin:
             continue
         candidates.append(x)
     groups = []
