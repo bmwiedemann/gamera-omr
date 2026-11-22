@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import cv2
 import numpy as np
 
 from .stacks import StackPage, from_array
@@ -208,6 +209,346 @@ def estimate_staff_space(arr: np.ndarray, band: Band) -> float | None:
     if best is None or best[0] < 0.30:
         return None
     return float(best[1])
+
+
+@dataclass
+class Trajectory:
+    line_fits: list[LineFit]
+    slope: float
+    quadratic: float
+    residual_rms: float
+    space: float
+    line_slope_spread_deg: float
+
+
+def _open_profile(sub: np.ndarray, space: float) -> tuple[np.ndarray, np.ndarray]:
+    """Horizontally open a strip, then return its row projection.
+
+    Staff lines survive the opening even when slightly sloped; stems and
+    most noteheads are narrower than the kernel.
+    """
+    k = max(3, int(round(1.2 * space)))
+    k = min(k, max(3, sub.shape[1] - 1))
+    kernel = np.ones((1, k), dtype=np.uint8)
+    opened = cv2.morphologyEx(sub.astype(np.uint8), cv2.MORPH_OPEN, kernel)
+    return opened, opened.sum(axis=1).astype(float)
+
+
+def strip_line_centers(
+    arr: np.ndarray,
+    band: Band,
+    *,
+    space: float,
+    staff: Staff | None = None,
+    coarse_slope: float = 0.0,
+    x_ref: float | None = None,
+    strip_width: int | None = None,
+    min_peak_fraction: float = 0.2,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Detect the five staff lines in narrow vertical strips."""
+    x0, x1 = band.x0, band.x1
+    if x_ref is None:
+        x_ref = 0.5 * (x0 + x1)
+    width = strip_width or max(24, int(round(2.0 * space)))
+    if x1 - x0 + 1 < width:
+        return np.zeros(0), np.zeros((0, 5))
+    xs: list[float] = []
+    ys: list[list[float]] = []
+    half = max(2.0, 0.6 * space)
+    lag = max(4, int(round(space)))
+    for xa in range(x0, x1 - width + 2, width):
+        xc = xa + (width - 1) / 2
+        sub = arr[band.y0:band.y1 + 1, xa:xa + width]
+        _opened, prof = _open_profile(sub, space)
+        if prof.max() <= 0:
+            continue
+        peaks: list[float] = []
+        if staff is not None:
+            for line in staff.lines:
+                pred = line - band.y0 + coarse_slope * (xc - x_ref)
+                lo = max(0, int(np.floor(pred - half)))
+                hi = min(len(prof) - 1, int(np.ceil(pred + half)))
+                if hi < lo or prof[lo:hi + 1].max() < min_peak_fraction * prof.max():
+                    peaks.append(float("nan"))
+                    continue
+                peaks.append(float(lo + int(np.argmax(prof[lo:hi + 1]))))
+        else:
+            best: tuple[float, list[int]] | None = None
+            for phase in range(lag):
+                idxs = [phase + k * lag for k in range(5) if phase + k * lag < len(prof)]
+                if len(idxs) < 5:
+                    break
+                score = float(sum(prof[i] for i in idxs))
+                if best is None or score > best[0]:
+                    best = (score, idxs)
+            if best is None:
+                continue
+            if any(prof[i] < min_peak_fraction * prof.max() for i in best[1]):
+                continue
+            peaks = [float(i) for i in best[1]]
+        xs.append(xc)
+        ys.append(peaks)
+    xs_arr = np.asarray(xs, dtype=float)
+    ys_arr = np.asarray(ys, dtype=float).reshape(-1, 5)
+    return xs_arr, ys_arr
+
+
+def _fit_model(xs: np.ndarray, ys: np.ndarray, x_ref: float, degree: int,
+               space: float) -> tuple[list[LineFit], float, float, float,
+                                       np.ndarray] | None:
+    """Robust shared-shape fit with one intercept per line.
+
+    ``y_i(x) = a_i + m*u + q*u**2``, ``u = x - x_ref``.  Fitting in scaled
+    coordinates keeps the quadratic column well conditioned.
+    """
+    n = ys.shape[1]
+    finite = np.isfinite(ys)
+    if finite.sum() < 10:
+        return None
+    usable = [i for i in range(n) if finite[:, i].sum() >= 3]
+    if len(usable) < 3:
+        return None
+    scale = max(1.0, float(np.abs(xs - x_ref).max()))
+    t = (xs - x_ref) / scale
+    col = {line: k for k, line in enumerate(usable)}
+    mask = finite.copy()
+
+    def solve(current_mask):
+        sample_line: list[int] = []
+        sample_idx: list[int] = []
+        target: list[float] = []
+        for line in usable:
+            for k in np.flatnonzero(current_mask[:, line]):
+                sample_line.append(line)
+                sample_idx.append(int(k))
+                target.append(float(ys[k, line]))
+        if len(target) < len(usable) + degree:
+            return None
+        line_arr = np.asarray(sample_line)
+        idx_arr = np.asarray(sample_idx)
+        yv = np.asarray(target)
+        design = np.zeros((len(yv), len(usable) + degree))
+        design[np.arange(len(yv)), [col[line] for line in line_arr]] = 1.0
+        tt = t[idx_arr]
+        design[:, len(usable)] = tt
+        if degree == 2:
+            design[:, len(usable) + 1] = tt * tt
+        coef, *_ = np.linalg.lstsq(design, yv, rcond=None)
+        return coef, line_arr, idx_arr, yv, design @ coef
+
+    for _ in range(3):
+        built = solve(mask)
+        if built is None:
+            return None
+        _coef, line_arr, idx_arr, yv, pred = built
+        keep = np.abs(yv - pred) <= max(1.0, 0.35 * space)
+        if keep.sum() < max(10, len(usable) + degree):
+            return None
+        new_mask = np.zeros_like(finite)
+        new_mask[idx_arr[keep], line_arr[keep]] = True
+        mask = new_mask
+
+    built = solve(mask)
+    if built is None:
+        return None
+    coef, _line_arr, _idx_arr, yv, pred = built
+    resid = yv - pred
+    rms = float(np.sqrt(np.mean(resid ** 2)))
+    intercepts = {line: float(coef[col[line]]) for line in usable}
+    slope = float(coef[len(usable)] / scale)
+    quad = float(coef[len(usable) + 1] / scale ** 2) if degree == 2 else 0.0
+    fits = []
+    for line in usable:
+        sel = mask[:, line]
+        if sel.sum() < 3:
+            continue
+        line_pred = (intercepts[line] + slope * (xs[sel] - x_ref)
+                     + quad * (xs[sel] - x_ref) ** 2)
+        line_rms = float(np.sqrt(np.mean((ys[sel, line] - line_pred) ** 2)))
+        fits.append(LineFit(intercepts[line], slope, quad, line_rms,
+                             int(sel.sum()), int(sel.sum())))
+    if len(fits) < 3:
+        return None
+    return fits, slope, quad, rms, mask
+
+
+def _independent_slope_spread(xs: np.ndarray, ys: np.ndarray,
+                              mask: np.ndarray, x_ref: float) -> float:
+    slopes = []
+    for i in range(ys.shape[1]):
+        sel = mask[:, i]
+        if sel.sum() >= 4:
+            p = np.polyfit(xs[sel] - x_ref, ys[sel, i], 1)
+            slopes.append(p[0])
+    if len(slopes) < 3:
+        return 0.0
+    ang = np.degrees(np.arctan(slopes))
+    return float(ang.max() - ang.min())
+
+
+def fit_band_trajectory(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    *,
+    space: float,
+    x_ref: float,
+    options: DeskewOptions = DeskewOptions(),
+) -> Trajectory | None:
+    linear = _fit_model(xs, ys, x_ref, 1, space)
+    if linear is None:
+        return None
+    fits, slope, _quad, rms, mask = linear
+    quad = 0.0
+    if rms > options.linear_residual_px:
+        quadratic = _fit_model(xs, ys, x_ref, 2, space)
+        if quadratic is not None:
+            _fits2, slope2, quad2, rms2, mask2 = quadratic
+            if (rms2 <= 0.85 * rms
+                    or rms - rms2 >= options.quadratic_gain_px):
+                fits, slope, quad, rms, mask = _fits2, slope2, quad2, rms2, mask2
+    intercepts = sorted(fit.intercept for fit in fits)
+    measured = (float(np.median(np.diff(intercepts)))
+                if len(intercepts) >= 2 else space)
+    spread = _independent_slope_spread(xs, ys, mask, x_ref)
+    return Trajectory(fits, slope, quad, rms, measured, spread)
+
+
+def _profile_sharpness(opened: np.ndarray, d: np.ndarray) -> float:
+    h = opened.shape[0]
+    pad = int(np.abs(d).max()) + 1 if d.size else 1
+    idx = (np.arange(h)[:, None] + pad - d[None, :]).ravel()
+    prof = np.bincount(idx, weights=opened.reshape(-1).astype(float),
+                       minlength=h + 2 * pad)
+    box = np.convolve(prof, np.ones(5) / 5.0, mode="same")
+    return float(((prof - box) ** 2).sum())
+
+
+def _gamera_angle_guesses(sub: np.ndarray, options: DeskewOptions) -> list[float]:
+    try:
+        img = from_array(np.ascontiguousarray(sub.astype(np.uint16)))
+        result = img.rotation_angle_projections(-options.max_angle_deg,
+                                                options.max_angle_deg)
+        return [float(result[0])]
+    except Exception:
+        return []
+
+
+def coarse_band_skew(
+    arr: np.ndarray,
+    band: Band,
+    *,
+    space: float | None = None,
+    options: DeskewOptions = DeskewOptions(),
+) -> BandSkew | None:
+    """Projection-profile angle estimate, used as a bootstrap or fallback."""
+    space = float(space or band.space or estimate_staff_space(arr, band) or 0)
+    if not 8 <= space <= 40:
+        return None
+    sub = arr[band.y0:band.y1 + 1, band.x0:band.x1 + 1]
+    opened, _prof = _open_profile(sub, space)
+    x_ref = 0.5 * (band.x0 + band.x1)
+    d_x = np.arange(band.x0, band.x1 + 1) - x_ref
+    max_t = float(np.tan(np.radians(options.max_angle_deg)))
+    coarse = np.linspace(-max_t, max_t, 17)
+    guesses = _gamera_angle_guesses(sub, options)
+    if guesses:
+        extra = [np.tan(np.radians(a)) for a in guesses]
+        coarse = np.unique(np.r_[coarse, extra, -np.asarray(extra)])
+    scores = [_profile_sharpness(opened, np.rint(s * d_x).astype(int))
+              for s in coarse]
+    best = float(coarse[int(np.argmax(scores))])
+    step = float(coarse[1] - coarse[0]) if len(coarse) > 1 else max_t / 8
+    fine = np.linspace(best - step, best + step, 9)
+    scores = [_profile_sharpness(opened, np.rint(s * d_x).astype(int))
+              for s in fine]
+    slope = float(fine[int(np.argmax(scores))])
+    plan = BandSkew(band=band, x_ref=x_ref, space=space, slope=slope,
+                    angle_deg=float(np.degrees(np.arctan(slope))),
+                    model="projection")
+    plan.shifts = _shifts_for(plan, arr.shape[1])
+    return _finalize(plan, options)
+
+
+def _shifts_for(plan: BandSkew, width: int) -> np.ndarray:
+    shifts = np.zeros(width, dtype=np.int32)
+    xs = np.arange(plan.band.x0, plan.band.x1 + 1)
+    values = plan.correction(xs)
+    shifts[plan.band.x0:plan.band.x1 + 1] = np.rint(values).astype(np.int32)
+    return shifts
+
+
+def _finalize(plan: BandSkew, options: DeskewOptions) -> BandSkew:
+    band = plan.band
+    xs = np.array([band.x0, 0.5 * (band.x0 + band.x1), band.x1], dtype=float)
+    c = np.asarray(plan.correction(xs), dtype=float)
+    plan.edge_deviation_px = float(c.max() - c.min())
+    plan.edge_deviation_spaces = plan.edge_deviation_px / max(plan.space, 1e-6)
+    plan.curvature_px = float(abs(c[1] - 0.5 * (c[0] + c[2])))
+    plan.angle_deg = float(np.degrees(np.arctan(plan.slope)))
+    if (plan.edge_deviation_spaces < options.min_edge_spaces
+            and plan.edge_deviation_px < options.min_edge_px):
+        plan.applied = False
+        plan.reason = "below_threshold"
+    elif abs(plan.angle_deg) > options.max_angle_deg:
+        plan.applied = False
+        plan.reason = "angle_too_large"
+    elif plan.edge_deviation_spaces > options.max_edge_spaces:
+        plan.applied = False
+        plan.reason = "edge_too_large"
+    elif plan.curvature_px / max(plan.space, 1e-6) > options.max_curvature_spaces:
+        plan.applied = False
+        plan.reason = "curvature_too_large"
+    elif (plan.shifts.size and
+          np.abs(plan.shifts).max() > options.max_shift_spaces * plan.space):
+        plan.applied = False
+        plan.reason = "shift_too_large"
+    elif (plan.residual_rms_px is not None
+          and plan.residual_rms_px > options.max_band_residual_px):
+        plan.applied = False
+        plan.reason = "high_residual"
+    elif plan.line_slope_spread_deg > options.max_line_slope_spread_deg:
+        plan.applied = False
+        plan.reason = "line_slope_spread"
+    else:
+        plan.applied = True
+        plan.reason = None
+    return plan
+
+
+def fit_band_skew(
+    arr: np.ndarray,
+    band: Band,
+    *,
+    staff: Staff | None = None,
+    space: float | None = None,
+    options: DeskewOptions = DeskewOptions(),
+) -> BandSkew | None:
+    """Estimate one band's staff-centre trajectory and shear plan."""
+    space = float(space or (staff.space if staff else 0)
+                  or band.space or estimate_staff_space(arr, band) or 0)
+    if not 8 <= space <= 40:
+        return None
+    x_ref = 0.5 * (band.x0 + band.x1)
+    coarse = coarse_band_skew(arr, band, space=space, options=options)
+    coarse_slope = coarse.slope if coarse is not None else 0.0
+    xs, ys = strip_line_centers(arr, band, space=space, staff=staff,
+                                coarse_slope=coarse_slope, x_ref=x_ref)
+    trajectory = fit_band_trajectory(xs, ys, space=space, x_ref=x_ref,
+                                     options=options)
+    if trajectory is None:
+        return coarse
+    if not 0.75 * space <= trajectory.space <= 1.25 * space:
+        return coarse
+    plan = BandSkew(
+        band=band, x_ref=x_ref, space=trajectory.space,
+        slope=trajectory.slope, quadratic=trajectory.quadratic,
+        residual_rms_px=trajectory.residual_rms,
+        model="quadratic" if trajectory.quadratic else "linear",
+        line_fits=trajectory.line_fits,
+        line_slope_spread_deg=trajectory.line_slope_spread_deg,
+    )
+    plan.shifts = _shifts_for(plan, arr.shape[1])
+    return _finalize(plan, options)
 
 
 def apply_shear(page: StackPage, plans: list[BandSkew], *,

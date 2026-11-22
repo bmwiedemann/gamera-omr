@@ -9,9 +9,10 @@ from gamera_omr.stacks import StackPage, from_array
 
 
 def synthetic_page(slopes=(0.0087, -0.0052, 0.0), space=14,
-                   width=1200, margin=80, gap=120):
-    """Build a page of independent systems with known staff-line slopes."""
+                   width=1200, margin=80, gap=120, bows=None):
+    """Build a page of independent systems with known slopes and bows."""
     systems = len(slopes)
+    bows = bows or tuple(0.0 for _ in slopes)
     height = margin * 2 + systems * (4 * space + 1) + (systems - 1) * gap + 60
     ideal = np.zeros((height, width), dtype=np.uint16)
     centers = []
@@ -22,11 +23,13 @@ def synthetic_page(slopes=(0.0087, -0.0052, 0.0), space=14,
             ideal[y + k * space:y + k * space + 2, 40:width - 40] = 1
     skewed = np.zeros_like(ideal)
     x_ref = width / 2
-    for i, slope in enumerate(slopes):
+    half = (width - 40) / 2
+    for i, (slope, bow) in enumerate(zip(slopes, bows)):
         y0 = centers[i]
         band = ideal[y0:y0 + 4 * space + 2]
         for x in range(40, width - 40):
-            d = int(round(slope * (x - x_ref)))
+            q = (x - x_ref) / half
+            d = int(round(slope * (x - x_ref) + bow * q * q))
             col = band[:, x]
             rows = np.flatnonzero(col)
             dst = rows + y0 + d
@@ -99,3 +102,68 @@ def test_shear_flattens_known_lines_and_keeps_x():
             assert after[0] is not None and after[1] is not None
             assert abs(after[0] - after[1]) <= 1.0
     assert fixed.shape == skewed.shape
+
+
+def test_fit_trajectory_recovers_slope_and_bow():
+    xs = np.arange(50, 1150, 30, dtype=float)
+    x_ref = 600.0
+    space = 19.5
+    slope = 0.012
+    bow = 4.0
+    quad = bow / 550.0 ** 2
+    ys = np.column_stack([
+        100 + k * space + slope * (xs - x_ref) + quad * (xs - x_ref) ** 2
+        for k in range(5)
+    ])
+    ys += np.random.default_rng(0).normal(0, 0.15, ys.shape)
+    traj = deskew.fit_band_trajectory(xs, ys, space=space, x_ref=x_ref)
+    assert traj is not None
+    assert abs(traj.slope - slope) < 0.001
+    assert abs(traj.quadratic - quad) <= 0.25 * quad
+    assert traj.residual_rms < 0.5
+    assert abs(traj.space - space) < 0.5
+
+
+def test_coarse_projection_recovers_injected_slope():
+    slopes = (0.0087, -0.0052)
+    page, arr, _centers = synthetic_page(slopes=slopes)
+    bands = deskew.find_system_bands(arr)
+    for band, slope in zip(bands, slopes):
+        plan = deskew.coarse_band_skew(arr, band, space=14)
+        assert plan is not None
+        assert abs(plan.slope - slope) < 0.001
+        assert plan.applied
+
+
+def test_fit_band_skew_with_staff_hints():
+    from gamera_omr.staffs import Staff
+
+    slopes = (0.0087, -0.0052, 0.0)
+    page, arr, centers = synthetic_page(slopes=slopes)
+    bands = deskew.find_system_bands(arr)
+    for band, y, slope in zip(bands, centers, slopes):
+        staff = Staff(band.index, [float(y + k * 14) for k in range(5)],
+                      40, 1160, 14, 2)
+        plan = deskew.fit_band_skew(arr, band, staff=staff)
+        assert plan is not None
+        assert abs(plan.slope - slope) < 0.001
+        assert plan.model in ("linear", "quadratic")
+
+
+def test_bowed_band_selects_quadratic_and_flattens():
+    slopes = (0.0, -0.0052, 0.0)
+    bows = (0.0, 4.0, 0.0)
+    page, arr, centers = synthetic_page(slopes=slopes, bows=bows)
+    bands = deskew.find_system_bands(arr)
+    plan = deskew.fit_band_skew(arr, bands[1], space=14)
+    assert plan is not None
+    assert plan.model == "quadratic"
+    assert plan.applied
+    fixed = deskew.apply_shear(page, [plan]).array()
+    y = centers[1]
+    left, right = 80, 1120
+    for k in range(5):
+        a = line_y(fixed, left, y + k * 14, 14)
+        b = line_y(fixed, right, y + k * 14, 14)
+        assert a is not None and b is not None
+        assert abs(a - b) <= 1.5
