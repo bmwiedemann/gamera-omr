@@ -240,6 +240,25 @@ def match_heads(ink: np.ndarray, space: float, templates, threshold: float = 0.6
     return kept[:6]
 
 
+def _distance_heads(ink: np.ndarray, space: float) -> list[tuple[float, float]]:
+    """Noteheads as thick blobs (distance-transform peaks).
+
+    Stems and beams are thin, so a distance transform suppresses them while
+    filled noteheads - including chords on one long stem - remain as blobs.
+    """
+    dt = cv2.distanceTransform(_u8(ink), cv2.DIST_L2, 5)
+    mask = (dt > max(1.5, 0.16 * space)).astype(np.uint8)
+    n, _labels, stats, cents = _components(mask)
+    heads = []
+    for i in range(1, n):
+        x, y, bw, bh, area = stats[i]
+        if (0.35 * space <= bw <= 1.7 * space
+                and 0.25 * space <= bh <= 1.4 * space
+                and bw <= 2.2 * bh and area >= 0.25 * bw * bh):
+            heads.append((float(cents[i][0]), float(cents[i][1])))
+    return heads
+
+
 def split_beam_group(ink: np.ndarray, space: float, templates=None):
     """Split a beamed group into (head_x, head_y, duration) per notehead."""
     h, w = ink.shape
@@ -251,13 +270,19 @@ def split_beam_group(ink: np.ndarray, space: float, templates=None):
     stem_boxes = []
     for i in range(1, n):
         x, y, bw, bh, _area = stats[i]
-        if bh >= 0.6 * space and bw <= max(4, 0.6 * space):
+        # Long piano stems are often merged with their noteheads by the
+        # vertical opening, so accept a wide box when it is clearly vertical.
+        if (bh >= 0.8 * space and bw <= max(4, 1.6 * space)
+                and bh >= 2.0 * bw):
             stem_boxes.append((x, y, x + bw - 1, y + bh - 1, float(cents[i][0])))
     nb, _blabels, bstats, _bcents = _components(beams)
     beam_boxes = []
     for j in range(1, nb):
         bx, by, bw, bh, _area = bstats[j]
-        beam_boxes.append((bx, by, bx + bw - 1, by + bh - 1))
+        # A filled notehead also survives the horizontal opening; keep only
+        # genuinely long, thin beam strokes so head rows are not excluded.
+        if bh <= 0.6 * space and bw >= max(1.2 * space, 2.0 * bh):
+            beam_boxes.append((bx, by, bx + bw - 1, by + bh - 1))
     matched = match_heads(ink, space, templates) if templates else []
     # One notehead per stem: heads sharing a stem are duplicates/false peaks.
     by_stem: dict[int, tuple[float, float, float]] = {}
@@ -273,10 +298,13 @@ def split_beam_group(ink: np.ndarray, space: float, templates=None):
             si = best[1]
             if si not in by_stem or score > by_stem[si][0]:
                 by_stem[si] = (score, x, y)
-    if by_stem:
-        heads = [(x, y) for _s, x, y in by_stem.values()]
-    else:
-        heads = [(x, y) for _s, x, y in matched[:4]]
+    matched_heads = [(x, y) for _s, x, y in by_stem.values()]
+    if not matched_heads:
+        matched_heads = [(x, y) for _s, x, y in matched[:4]]
+    blob_heads = _distance_heads(ink, space)
+    # The blob detector handles long stems and chords; templates are better
+    # for clean single-note groups.  Prefer whichever finds more heads.
+    heads = blob_heads if len(blob_heads) > len(matched_heads) else matched_heads
     group_levels = sorted((by0 + by1) / 2 for _a, by0, _b, by1 in beam_boxes)
     group_count = 1
     if group_levels:
