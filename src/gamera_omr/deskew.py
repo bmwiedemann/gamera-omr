@@ -721,6 +721,8 @@ def deskew_page(
     if initial_staves:
         pre = _summary(initial_staves, initial_diag)
         bands = find_system_bands(arr, staves=initial_staves, options=options)
+        if len(bands) != len(initial_staves):
+            return _rejected(page, initial_staves, [], "band_count_mismatch", pre)
         plans_by_staff: dict[int, BandSkew] = {}
         for band, staff in zip(bands, initial_staves):
             plan = fit_band_skew(arr, band, staff=staff, options=options)
