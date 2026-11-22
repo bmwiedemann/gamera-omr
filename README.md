@@ -3,35 +3,29 @@
 An optical music recognition engine for the BWV 248 project, built on
 **Gamera 4 + the MusicStaves toolkit** (the recognition core that Rodan wraps).
 
-Status: **Stage 1 + first reader** — Python 3.13 port, staff finding/validation,
-staff-line removal, connected-component segmentation, barline/measure detection, a
-kNN glyph classifier, note/beam decoding, MusicXML output, and debug overlays.
+Status: **Stage 1 + first reader** — Python 3.13 port, per-system skew/curvature
+correction, staff finding/validation, staff-line removal, connected-component
+segmentation, barline/measure detection, a kNN glyph classifier, note/beam
+decoding, MusicXML output, and debug overlays.
 
 ## Rest detection (Rösler/Sibley first)
 
-The 1900s vocal scores are rest-heavy, so rests are now handled before anything else:
+The 1900s vocal scores are rest-heavy, so rests are handled explicitly:
 
 - a measure with no detected notes becomes one **full-measure rest**;
-- a solid, short, **centred rest bar** (whole/half rest) marks a tacet measure, even
-  when the classifier produced false notes there (Rösler/Sibley);
+- classifier rest classes (`rest.8`, `rest.quarter`, ...) become rest events;
 - for Rösler/Sibley the **printed x position** of each notehead sets the onset;
   the remaining gaps become rests.  Notes are capped by their glyph duration, so a
   quarter followed by a rest yields a quarter plus a rest, not a long note;
 - rest and note durations are split into standard note values (e.g. 5/4 = 1 + 1/4,
   with ties) so MusicXML export always succeeds.
 
-Measured on the 1900s pages (the first page starts at printed bar 33; truth =
-`data/01/voices/S.json` measures 33+):
-
-| page | truth notes | omr notes | rests | measure fills correct | note F1 | pitch F1 |
-|---|---|---|---|---|---|---|
-| Rösler soprano p1 (bars 33–61) | 74 | 45 | 27 | 27/29 | 0.22 | 0.40 |
-| Sibley soprano p1 (bars 33–58) | 65 | 32 | 28 | 23/26 | 0.10 | 0.33 |
-
-Rest placement is now structurally sound (all 29/26 measures carry rests, and nearly
-all measures sum to 3/8); the remaining note F1 is limited by the common (NBA) glyph
-model on these fonts.  Per-font models and symbol-level quarter/eighth-rest classes are
-the next step.  NBA output is unchanged at note F1 0.95 / pitch F1 0.98.
+The old "centred printed bar means tacet" override is still available as
+`--tacet-bars`, but it is **off by default**: on the checked pages the bar detector
+also matches beams and accidentals, and dropping notes there lowered F1 on both
+Rösler and Sibley.  Empty measures and classifier rests already cover the reliable
+cases.  Current readings are in "Per-system deskewing" below; NBA output is unchanged
+at note F1 0.95 / pitch F1 0.98.
 
 ## Per-font models
 
@@ -46,12 +40,59 @@ Rösler and Sibley now have their own kNN models rather than the NBA one:
 | Sibley, before model | common (NBA) | soprano p1 | 0.10 | 0.33 |
 | Rösler, before model | common (NBA) | soprano p1 | 0.22 | 0.40 |
 
-The Sibley model roughly doubles note F1; Rösler improves mainly on pitch, because its
-notation is currently limited by measure segmentation, not glyph classification.  The
-models' class sets include `rest.8`/`rest.quarter`, `beam.group`, `accidental`, `text`,
-`beam`, `slur` and `skip`; rest events feed the rest/x-rhythm pass.  Training labels and
-models are in `models/{rosler,sibley}/`; regenerating a corpus/sheet and re-running
-`train` reproduces them.
+These per-font numbers were measured before per-system deskewing.  With the correction
+enabled, the current readings are the ones in the next section.  The models' class sets
+include `rest.8`/`rest.quarter`, `beam.group`, `accidental`, `text`, `beam`, `slur` and
+`skip`.  Training labels and models are in `models/{rosler,sibley}/`; regenerating a
+corpus/sheet and re-running `train` reproduces them.
+
+## Per-system deskewing
+
+Each stack page is a vertical concatenation of separately cropped systems, so skew is
+per system.  Measured on the sample stacks (edge deviation at the staff ends):
+
+| source | max angle | max edge deviation |
+|---|---|---|
+| NBA | 0.11° | 0.29 staff spaces |
+| BGA | 0.28° | 0.44 |
+| Rösler | 0.35° | 0.76 |
+| Sibley | 0.89° | 1.88 (plus a 3–5 px bow) |
+
+A single page rotation is therefore wrong, and several systems are bowed rather than
+merely rotated.  The engine now:
+
+1. finds one row band per system (blank-row segmentation, or staff hints snapped to
+   blank rows);
+2. fits the five-line staff centre trajectory `y(x)` in each band with a robust
+   shared-shape model (independent line intercepts, common slope, optional quadratic);
+   the five-line comb is detected over the full band, so a biased row-projection
+   finder line is corrected rather than trusted;
+3. applies an **integer vertical shear** `y' = y - round(y(x))` per column.  X is
+   unchanged, so measures, x-rhythm and component positions stay put; vertical
+   barlines and stems stay vertical; no resampling is needed;
+4. re-fits the corrected page and accepts only when the residual or edge deviation
+   improves and the staff geometry still validates.  If the raw page cannot be
+   staff-found at all (Sibley S-02), coarse projection shears bootstrap staff
+   finding, then line trajectories are re-fitted.
+
+The shear can be disabled with `--no-deskew`, which is also the A/B baseline.  Skew
+diagnostics are reported under `deskew` (per band: angle, edge deviation in px and
+staff spaces, curvature, residual, model, shifts, applied/reason), and `debug` writes
+`00-deskew.png`.  Small NBA skew is deliberately a no-op.
+
+Current soprano page results (truth starts at printed bar 33):
+
+| page | notes truth/omr | note F1 raw → deskew | pitch F1 raw → deskew |
+|---|---|---|---|
+| Rösler p1 (bars 33–61) | 74 / 78 → 74 / 91 | 0.237 → **0.315** | 0.447 → **0.606** |
+| Sibley p1 (bars 33–58) | 65 / 60 → 65 / 80 | 0.240 → 0.193 | 0.416 → 0.400 |
+| NBA mvt 5 (no-op) | 45 / 43 → 45 / 43 | 0.9545 → 0.9545 | 0.9773 → 0.9773 |
+
+Rösler improves substantially and Sibley S-02 now yields six validated staves where
+the raw finder failed.  Sibley's note F1 is still slightly below the raw page: with the
+staff lines finally where they belong, staff removal exposes more note/beam fragments
+that the current glyph model over-detects.  That precision problem is now the limiting
+factor on Sibley, not skew.
 
 Remaining bottlenecks on these pages: Rösler barlines are inset/flush with the staff
 (the loose barline mode exists but over-splits), and symbol-level rest/accidental
@@ -67,17 +108,16 @@ Scored against the checked NBA-derived readings (`partitur/BWV248/gemeinfrei/...
 | Nr. 5 Choral, soprano | NBA, 1960 | 45 | 43 | **0.95** | **0.98** |
 | Nr. 5 Choral, soprano | BGA, 1856 | 45 | 37 | 0.37 | 0.63 |
 | Nr. 12 Choral, soprano | NBA, 1960 | 49 | 46 | 0.44 | 0.80 |
-| Nr. 1, soprano page 1 | Rösler, c.1900 | 0 (rests) | 72 false | — | — |
-| Nr. 1, soprano page 1 | Sibley, c.1900 | 0 (rests) | 60 false | — | — |
+| Nr. 1, soprano page 1 | Rösler, c.1900 | 74 | 91 | 0.32 | 0.61 |
+| Nr. 1, soprano page 1 | Sibley, c.1900 | 65 | 80 | 0.19 | 0.40 |
 
-The two 1900s vocal-score pages are the instrumental opening where the soprano rests;
-all 132 emitted notes are false. **Rest detection is the largest missing class for
-1900s vocal scores.**
-
-Known gaps (v1): rests (infrastructure is in place, models need rest labels),
-in-measure accidentals, notes whose head is merged with a slur/fermata, beamed-group
-rhythm on dense pages, measure boundaries on pages with repeat/double bars, and
-per-font models for Rösler/Sibley (only BGA has one so far).
+The 1900s scores are far more variable than NBA.  Rest placement is now structural
+(empty measures become rests, printed rests are classified, gaps become rests), and
+the remaining errors are mostly symbol-level: in-measure accidentals, rests merged
+with beams/ornaments, and note/beam fragments exposed by correct staff removal.
+Known gaps (v1): in-measure accidentals, ties/slurs/fermatas, beamed-group rhythm on
+dense pages, perspective or more than one staff per system, and Sibley note precision
+after staff removal.
 
 ## Reliability tooling
 
@@ -92,9 +132,13 @@ per-font models for Rösler/Sibley (only BGA has one so far).
       --image ~/git/music/work/stacks/rosler/S-01.png \
       --source rosler --voice S --movement 1
   ```
-  It includes the staff backend/space/oracle MAE, glyph class counts, mean and
-  low-confidence glyphs, text/segmentation drops, measure-fill mismatches, empty
-  measures, and flags such as `low_mean_confidence`, `many_measure_fill_mismatches`.
+  It includes the staff backend/space/oracle MAE, the per-system `deskew` block
+  (angle, edge deviation, curvature, residual, applied/rejected bands), glyph class
+  counts, mean and low-confidence glyphs, text/segmentation drops, measure-fill
+  mismatches, empty measures, and flags such as `low_mean_confidence`,
+  `many_measure_fill_mismatches`, `deskew_rejected` and
+  `deskew_high_residual`.  `oracle_mae` is measured on the raw page and labelled
+  via `oracle_frame`.
 - The event band excludes text above the staff (instrument names) and a tall/narrow
   clef zone at each system start; the old prints otherwise turn those into phantom
   notes.
@@ -149,6 +193,12 @@ editable, and runs a smoke test.
 .venv/bin/python -m gamera_omr.cli read \
     --image ~/git/music/work/mvt/5/stacks/nba/S-01.png \
     --source nba --voice S --movement 5 -o /tmp/S5.musicxml
+
+# compare without the per-system skew correction
+.venv/bin/python -m gamera_omr.cli read ... --no-deskew -o /tmp/S5-raw.musicxml
+
+# restore the old printed-rest-bar tacet override (off by default)
+.venv/bin/python -m gamera_omr.cli read ... --tacet-bars -o /tmp/S5-tacet.musicxml
 
 # rebuilding the glyph model (headless labelling)
 .venv/bin/python -m gamera_omr.cli corpus --image IMAGE.png --out /tmp/corpus
