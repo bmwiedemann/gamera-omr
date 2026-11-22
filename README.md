@@ -35,14 +35,16 @@ Rösler and Sibley now have their own kNN models rather than the NBA one:
 | source | model | training data | page-1 note / pitch F1 |
 |---|---|---|---|
 | Rösler | `models/rosler/model.xml` | raw soprano p1 | 0.32 / 0.61 |
-| Sibley | `models/sibley/model.xml` | deskewed S-01/S-02/S-03 | 0.27 / 0.58 |
+| Sibley | `models/sibley/model.xml` | deskewed S-02/S-03 (S-01 held out) | 0.33 / 0.58 |
 | Sibley, old model | `models/sibley/model-raw.xml` | raw soprano p1 | 0.25 / 0.46 |
 
 These are current-pipeline numbers, so they include the per-system deskewing and, for
 Sibley, the notehead repair below.  The Sibley model was retrained on deskewed pages
 because the old one, trained on raw glyphs, classified heading text and beam fragments
 as notes; the old model is kept for A/B (`--model models/sibley/model-raw.xml`).
-Held-out Sibley S-03 scores 0.29 / 0.46.  The class sets include
+The Sibley figure is held out (trained on S-02/S-03).  Page S-04, which is in no
+training split, scores 0.19 / 0.43 (old model 0.19 / 0.47): the note gains generalise
+better than the pitch gains, and page 4 remains harder.  The class sets include
 `rest.8`/`rest.quarter`, `beam.group`, `accidental`, `text`, `beam`, `slur` and `skip`.
 
 ## Per-system deskewing
@@ -84,7 +86,7 @@ Current soprano page results (truth = the checked soprano part over the page ran
 | page | notes truth/omr | note F1 raw → deskew | pitch F1 raw → deskew |
 |---|---|---|---|
 | Rösler p1 | 74 / 78 → 74 / 91 | 0.237 → **0.315** | 0.447 → **0.606** |
-| Sibley p1 | 74 / 60 → 74 / 94 | 0.240 → **0.274** | 0.416 → **0.583** |
+| Sibley p1 | 74 / 60 → 74 / 98 | 0.240 → **0.326** | 0.416 → **0.581** |
 | NBA mvt 5 (no-op) | 45 / 43 → 45 / 43 | 0.9545 → 0.9545 | 0.9773 → 0.9773 |
 
 Sibley S-02 now yields six validated staves where the raw finder failed, and the
@@ -113,7 +115,7 @@ Scored against the checked NBA-derived readings (`partitur/BWV248/gemeinfrei/...
 | Nr. 5 Choral, soprano | BGA, 1856 | 45 | 37 | 0.37 | 0.63 |
 | Nr. 12 Choral, soprano | NBA, 1960 | 49 | 46 | 0.44 | 0.80 |
 | Nr. 1, soprano page 1 | Rösler, c.1900 | 74 | 91 | 0.32 | 0.61 |
-| Nr. 1, soprano page 1 | Sibley, c.1900 | 74 | 94 | 0.27 | 0.58 |
+| Nr. 1, soprano page 1 | Sibley, c.1900 | 74 | 98 | 0.33 | 0.58 |
 
 The 1900s scores are far more variable than NBA.  Rest placement is now structural
 (empty measures become rests, printed rests are classified, gaps become rests), and
