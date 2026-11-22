@@ -128,6 +128,13 @@ def cmd_classify(args) -> int:
     return 0
 
 
+def default_model(source: str) -> Path:
+    """Prefer a model trained for the edition's font, else the common one."""
+    base = "bga" if source.startswith("bga") else source
+    candidate = Path("models") / base / "model.xml"
+    return candidate if candidate.exists() else Path("models/common/model.xml")
+
+
 def cmd_read(args) -> int:
     page = load_stack(args.image)
     staves, diag = find_staves(page, args.backend)
@@ -135,36 +142,39 @@ def cmd_read(args) -> int:
     with tempfile.TemporaryDirectory() as td:
         corpus = Path(td)
         glyphs.save_corpus(items, corpus)
-        model = classify.load_model(Path(args.model))
+        model = classify.load_model(args.model and Path(args.model) or default_model(args.source))
         predictions = classify.predict(model, corpus)
 
     clef = config.clef(args.source, args.voice)
     fifths = config.key_fifths(args.movement) or 0
     time_signature = config.time_signature(args.movement)
     arr = page.array()
+    legacy = not args.source.startswith("nba")
     cleaned = remove_staff_lines(page, staves)
     all_comps = segments.components(cleaned.image)
     dots = []
-    for staff in staves:
-        for c in all_comps:
-            if (2 <= c.area <= int(0.35 * staff.space ** 2)
-                    and 0.1 * staff.space <= c.w <= 0.5 * staff.space
-                    and 0.1 * staff.space <= c.h <= 0.5 * staff.space
-                    and staff.top - staff.space <= c.cy <= staff.bottom + staff.space):
-                dots.append((c.cx, c.cy))
+    if not args.no_dots:
+        for staff in staves:
+            for c in all_comps:
+                if (2 <= c.area <= int(0.35 * staff.space ** 2)
+                        and 0.1 * staff.space <= c.w <= 0.5 * staff.space
+                        and 0.1 * staff.space <= c.h <= 0.5 * staff.space
+                        and staff.top - staff.space <= c.cy <= staff.bottom + staff.space):
+                    dots.append((c.cx, c.cy))
     events = []
     offset = 0
+    bar = Fraction(meter.TimeSignature(time_signature).barDuration.quarterLength)
     for staff in staves:
         barlines = segments.find_barlines(arr, staff)
         bounds = segments.measure_bounds(staff, barlines)
         staff_events = decode.decode_staff(staff, items, predictions, bounds,
-                                           clef, fifths, dots=dots)
+                                           clef, fifths, dots=dots, legacy=legacy,
+                                           bar_length=bar)
         for event in staff_events:
             event.measure += offset
         events.extend(staff_events)
         offset += len(bounds)
 
-    bar = Fraction(meter.TimeSignature(time_signature).barDuration.quarterLength)
     decode.fit_durations(events, offset, bar)
     events = decode.assign_onsets(events, offset, bar)
     fills = decode.measure_fill(events, offset, bar)
@@ -178,6 +188,91 @@ def cmd_read(args) -> int:
     bad = [(i + 1, str(s)) for i, s in enumerate(fills) if s != bar]
     if bad:
         print(f"measure-fill mismatches ({len(bad)}): {bad[:16]}")
+    return 0
+
+
+def cmd_report(args) -> int:
+    """Per-page reliability metrics; flags pages that need manual review."""
+    page = load_stack(args.image)
+    staves, diag = find_staves(page, args.backend)
+    items = glyphs.extract(page, staves)
+    with tempfile.TemporaryDirectory() as td:
+        corpus = Path(td)
+        glyphs.save_corpus(items, corpus)
+        model = classify.load_model(Path(args.model) if args.model else default_model(args.source))
+        predictions = classify.predict(model, corpus)
+
+    arr = page.array()
+    cleaned = remove_staff_lines(page, staves)
+    all_comps = segments.components(cleaned.image)
+    clef = config.clef(args.source, args.voice)
+    fifths = config.key_fifths(args.movement) or 0
+    time_signature = config.time_signature(args.movement)
+    bar = Fraction(meter.TimeSignature(time_signature).barDuration.quarterLength)
+    legacy = not args.source.startswith("nba")
+
+    events: list = []
+    drops, barlines, measures = {}, {}, {}
+    offset = 0
+    for staff in staves:
+        _kept, dropped = segments.filter_components(all_comps, staff)
+        drops[str(staff.index)] = dropped
+        bars = segments.find_barlines(arr, staff)
+        bounds = segments.measure_bounds(staff, bars)
+        barlines[str(staff.index)] = len(bars)
+        measures[str(staff.index)] = len(bounds)
+        staff_events = decode.decode_staff(staff, items, predictions, bounds,
+                                           clef, fifths, dots=[],
+                                           legacy=legacy, bar_length=bar)
+        for event in staff_events:
+            event.measure += offset
+        events.extend(staff_events)
+        offset += len(bounds)
+
+    decode.fit_durations(events, offset, bar)
+    events = decode.assign_onsets(events, offset, bar)
+    fills = decode.measure_fill(events, offset, bar)
+    mismatches = [(i + 1, str(s)) for i, s in enumerate(fills) if s != bar]
+
+    classes, confidences = {}, []
+    for prediction in predictions.values():
+        label = prediction["label"]
+        classes[label] = classes.get(label, 0) + 1
+        confidences.append(prediction["confidence"])
+    mean_conf = round(sum(confidences) / len(confidences), 3) if confidences else None
+
+    flags = []
+    if diag.get("backend") == "oracle":
+        flags.append("staff_fallback_oracle")
+    if mean_conf is not None and mean_conf < 0.85:
+        flags.append("low_mean_confidence")
+    if sum(1 for c in confidences if c < 0.75) > max(3, len(confidences) // 10):
+        flags.append("low_confidence_glyphs")
+    if len(mismatches) > max(2, offset // 4):
+        flags.append("many_measure_fill_mismatches")
+    if any(s == 0 for s in fills):
+        flags.append("empty_measures")
+    if not any(k.startswith("note.") for k in classes):
+        flags.append("no_notes")
+
+    report = {
+        "image": str(page.path), "source": args.source, "voice": args.voice,
+        "movement": args.movement,
+        "model": str(Path(args.model) if args.model else default_model(args.source)),
+        "staff": {"backend": diag.get("backend"), "count": len(staves),
+                  "spaces": [round(s.space, 1) for s in staves],
+                  "oracle_mae": diag.get("oracle_mae"), "tried": diag.get("tried")},
+        "glyphs": {"total": len(items), "classes": classes,
+                   "mean_confidence": mean_conf,
+                   "low_confidence": sum(1 for c in confidences if c < 0.75)},
+        "segmentation": {"drops": drops, "barlines": barlines, "measures": measures},
+        "rhythm": {"measures": offset, "fill_mismatches": len(mismatches),
+                   "details": mismatches[:20], "empty": sum(1 for s in fills if s == 0)},
+        "events": {"notes": sum(1 for e in events if e.kind == "note"),
+                   "rests": sum(1 for e in events if e.kind == "rest")},
+        "flags": flags,
+    }
+    print(json.dumps(report, indent=1))
     return 0
 
 
@@ -231,12 +326,23 @@ def main(argv=None) -> int:
     p.add_argument("--out")
     p.set_defaults(func=cmd_classify)
 
+    p = sub.add_parser("report", help="per-page reliability metrics and review flags")
+    p.add_argument("--image", required=True)
+    p.add_argument("--source", required=True)
+    p.add_argument("--voice", required=True)
+    p.add_argument("--movement", type=int, required=True)
+    p.add_argument("--model")
+    p.add_argument("--backend", default="auto", choices=["auto", "projections", "miyao"])
+    p.set_defaults(func=cmd_report)
+
     p = sub.add_parser("read", help="read a stack into MusicXML (Stage 1)")
     p.add_argument("--image", required=True)
     p.add_argument("--source", required=True)
     p.add_argument("--voice", required=True)
     p.add_argument("--movement", type=int, required=True)
-    p.add_argument("--model", default="models/common/model.xml")
+    p.add_argument("--model", help="glyph model (default: per-font, else common)")
+    p.add_argument("--no-dots", action="store_true",
+                   help="do not apply dotted-note detection")
     p.add_argument("--backend", default="auto", choices=["auto", "projections", "miyao"])
     p.add_argument("-o", "--out", required=True)
     p.set_defaults(func=cmd_read)

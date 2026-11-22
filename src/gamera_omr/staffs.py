@@ -109,12 +109,17 @@ def validate_staves(staves: list[Staff], image) -> tuple[bool, list[str]]:
             reasons.append(f"staff {staff.index}: lines not increasing")
         if diffs.mean() > 0:
             cv = float(diffs.std() / diffs.mean())
-            if cv > 0.10:
+            if cv > 0.15:
                 reasons.append(f"staff {staff.index}: spacing CV {cv:.3f}")
-        if not 10 <= staff.space <= 28:
+        if not 8 <= staff.space <= 40:
             reasons.append(f"staff {staff.index}: space {staff.space:.1f}")
-        if not 55 <= staff.height <= 90:
-            reasons.append(f"staff {staff.index}: height {staff.height:.1f}")
+        # Height must match the line count and space, not an absolute pixel
+        # range: small 1900s vocal-score prints have ~52 px staves, while
+        # 600-dpi scans can have >90 px.
+        expected = 4.0 * staff.space + staff.thickness
+        if not 0.80 * expected <= staff.height <= 1.20 * expected:
+            reasons.append(f"staff {staff.index}: height {staff.height:.1f} "
+                           f"vs expected {expected:.1f}")
         if staff.right - staff.left < 0.55 * width:
             reasons.append(f"staff {staff.index}: x coverage {staff.right - staff.left:.0f}")
     for i in range(len(staves) - 1):

@@ -12,14 +12,44 @@ kNN glyph classifier, note/beam decoding, MusicXML output, and debug overlays.
 Scored against the checked NBA-derived readings (`partitur/BWV248/gemeinfrei/...`) with
 `sheetscan/bench/evalscore.py`:
 
-| page | truth notes | omr notes | note F1 | pitch F1 |
-|---|---|---|---|---|
-| Nr. 5 Choral, NBA soprano (`work/mvt/5/stacks/nba/S-01.png`) | 45 | 43 | **0.95** | **0.98** |
-| Nr. 12 Choral, NBA soprano (`work/mvt/12/stacks/nba/S-01.png`) | 49 | 46 | 0.44 | 0.80 |
+| page | source / font | truth notes | omr notes | note F1 | pitch F1 |
+|---|---|---|---|---|---|
+| Nr. 5 Choral, soprano | NBA, 1960 | 45 | 43 | **0.95** | **0.98** |
+| Nr. 5 Choral, soprano | BGA, 1856 | 45 | 37 | 0.37 | 0.63 |
+| Nr. 12 Choral, soprano | NBA, 1960 | 49 | 46 | 0.44 | 0.80 |
+| Nr. 1, soprano page 1 | Rösler, c.1900 | 0 (rests) | 72 false | — | — |
+| Nr. 1, soprano page 1 | Sibley, c.1900 | 0 (rests) | 60 false | — | — |
 
-Known gaps (v1): in-measure accidentals (Nr. 12's C♯ is read as C), notes whose head is
-merged with a slur/fermata, beamed-group rhythm on dense pages, rests, and per-font
-models (the shipped model is trained on the NBA chorale font).
+The two 1900s vocal-score pages are the instrumental opening where the soprano rests;
+all 132 emitted notes are false. **Rest detection is the largest missing class for
+1900s vocal scores.**
+
+Known gaps (v1): rests (infrastructure is in place, models need rest labels),
+in-measure accidentals, notes whose head is merged with a slur/fermata, beamed-group
+rhythm on dense pages, measure boundaries on pages with repeat/double bars, and
+per-font models for Rösler/Sibley (only BGA has one so far).
+
+## Reliability tooling
+
+- Staff validation is relative to staff space (`height ≈ 4·space + thickness`), not an
+  absolute pixel range; this is what makes the small Rösler staves (13–14.5 px space,
+  52–54 px height) pass. Spacing CV tolerance is 0.15.
+- A model is chosen automatically per edition: `models/<font>/model.xml` if present,
+  otherwise `models/common/model.xml` (`bga` covers `bga2`).
+- `report` prints per-page metrics and review flags:
+  ```bash
+  .venv/bin/python -m gamera_omr.cli report \
+      --image ~/git/music/work/stacks/rosler/S-01.png \
+      --source rosler --voice S --movement 1
+  ```
+  It includes the staff backend/space/oracle MAE, glyph class counts, mean and
+  low-confidence glyphs, text/segmentation drops, measure-fill mismatches, empty
+  measures, and flags such as `low_mean_confidence`, `many_measure_fill_mismatches`.
+- The event band excludes text above the staff (instrument names) and a tall/narrow
+  clef zone at each system start; the old prints otherwise turn those into phantom
+  notes.
+- Older prints use a class-primary quarter/half decision (`legacy=True`), because their
+  open noteheads often have an inked counter; modern NBA prints use the ink-ratio rule.
 
 ## Why
 

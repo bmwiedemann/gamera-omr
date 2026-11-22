@@ -22,8 +22,9 @@ def write(events: list[Event], nmeasures: int, clef: str, fifths: int,
     measures[0].insert(0, mkey.KeySignature(fifths or 0))
     measures[0].insert(0, meter.TimeSignature(time_signature))
     for e in events:
-        n = note.Note()
-        n.pitch = e.pitch
+        n = note.Rest() if e.kind == "rest" else note.Note()
+        if e.kind != "rest":
+            n.pitch = e.pitch
         n.duration.quarterLength = e.duration
         measures[e.measure].insert(e.onset, n)
     for m in measures:
