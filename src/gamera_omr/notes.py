@@ -199,8 +199,13 @@ def head_template(ink: np.ndarray, space: float):
 def make_templates(glyphs, predictions, limit: int = 12):
     templates, seen = [], set()
     for g in glyphs:
-        if predictions.get(g.uid, {}).get("label") not in ("note.black", "note.open"):
-            continue
+        label = predictions.get(g.uid, {}).get("label")
+        if label not in ("note.black", "note.open"):
+            # Staff-line removal can leave an isolated head that the
+            # classifier calls text.  Its clean ellipse is a good template
+            # for matching heads in signature/tall-narrow glyphs.
+            if not (label in ("text", "skip") and g.head_like):
+                continue
         tpl = head_template(g.ink, g.space)
         if tpl is None:
             continue
@@ -315,7 +320,99 @@ def _erosion_heads(ink: np.ndarray, space: float) -> list[tuple[float, float]]:
     return heads
 
 
-def split_beam_group(ink: np.ndarray, space: float, templates=None):
+def _rowrun_heads(ink: np.ndarray, space: float, stem_boxes):
+    """Noteheads as clusters of rows whose ink run is about head-wide.
+
+    A sloping beam is long in every row, and a stem is only a few pixels
+    wide, so a run between roughly 0.65 and 2.2 staff spaces is a head.  A
+    head split by an erased staff line yields two clusters; that is why the
+    merge with the other detectors uses a generous vertical tolerance.
+    """
+    h, w = ink.shape
+    lo, hi = 0.65 * space, 2.2 * space
+    recs = []
+    for y in range(h):
+        idx = np.flatnonzero(ink[y])
+        if len(idx) == 0:
+            continue
+        splits = np.flatnonzero(np.diff(idx) > 1)
+        starts = np.r_[idx[0], idx[splits + 1]]
+        ends = np.r_[idx[splits], idx[-1]]
+        for a, b in zip(starts, ends):
+            length = b - a + 1
+            if lo <= length <= hi:
+                recs.append((y, (a + b) / 2.0))
+    heads = []
+    used = [False] * len(recs)
+    recs.sort()
+    for i, (y, x) in enumerate(recs):
+        if used[i]:
+            continue
+        group = [(y, x)]
+        used[i] = True
+        changed = True
+        while changed:
+            changed = False
+            ys = [g[0] for g in group]
+            xs = [g[1] for g in group]
+            for j, (y2, x2) in enumerate(recs):
+                if used[j]:
+                    continue
+                if (abs(y2 - max(ys)) <= 2 or abs(y2 - min(ys)) <= 2):
+                    if any(abs(x2 - x3) <= 0.5 * space for x3 in xs):
+                        group.append((y2, x2))
+                        used[j] = True
+                        changed = True
+        ys = [g[0] for g in group]
+        if max(ys) - min(ys) + 1 < 0.35 * space:
+            continue
+        cx = float(np.mean([g[1] for g in group]))
+        cy = (min(ys) + max(ys)) / 2.0
+        margin = max(2, int(round(0.25 * space)))
+        if cy < margin or cy > h - 1 - margin:
+            continue  # a beam or staff remnant at the glyph's top/bottom edge
+        if not stem_boxes:
+            heads.append((cx, cy))
+            continue
+        for x0, y0, x1, y1, scx in stem_boxes:
+            if abs(scx - cx) > 0.8 * space:
+                continue
+            if not (y0 - 1.0 * space <= cy <= y1 + 1.0 * space):
+                continue
+            # A head sits at the free end of its stem, not on the beam end.
+            if cy <= y0 + 1.2 * space or cy >= y1 - 1.2 * space:
+                heads.append((cx, cy))
+                break
+    return heads
+
+
+def _head_end_ok(x: float, y: float, stem_boxes, beam_boxes,
+                 space: float) -> bool:
+    """True when (x, y) is at the free end of a stem, not on its beam end."""
+    for x0, y0, x1, y1, scx in stem_boxes:
+        if abs(scx - x) > 0.9 * space:
+            continue
+        if not (y0 - 1.1 * space <= y <= y1 + 1.1 * space):
+            continue
+        top = any(min(x1, bx1) >= max(x0, bx0) - 2
+                  and abs((by0 + by1) / 2.0 - y0) <= 1.3 * space
+                  for bx0, by0, bx1, by1 in beam_boxes)
+        bottom = any(min(x1, bx1) >= max(x0, bx0) - 2
+                     and abs((by0 + by1) / 2.0 - y1) <= 1.3 * space
+                     for bx0, by0, bx1, by1 in beam_boxes)
+        if top and not bottom:
+            if y >= y1 - 1.1 * space:
+                return True
+        elif bottom and not top:
+            if y <= y0 + 1.1 * space:
+                return True
+        elif y <= y0 + 1.1 * space or y >= y1 - 1.1 * space:
+            return True
+    return False
+
+
+def split_beam_group(ink: np.ndarray, space: float, templates=None,
+                     *, use_rowrun: bool = True):
     """Split a beamed group into (head_x, head_y, duration) per notehead."""
     h, w = ink.shape
     stem_k = np.ones((max(4, int(0.9 * space)), 1), np.uint8)
@@ -358,11 +455,37 @@ def split_beam_group(ink: np.ndarray, space: float, templates=None):
     if not matched_heads:
         matched_heads = [(x, y) for _s, x, y in matched[:4]]
     blob_heads = _distance_heads(ink, space)
+    rowrun_all = _rowrun_heads(ink, space, []) if use_rowrun else []
+    rowrun_valid = (_rowrun_heads(ink, space, stem_boxes)
+                    if use_rowrun and stem_boxes else [])
+    if stem_boxes and use_rowrun:
+        # A thick sloping beam is also a distance-transform blob in places;
+        # keep a blob only when a row-run cluster agrees with it (the head
+        # detectors found the group's other heads) or it sits at a stem end.
+        def supported(hx, hy):
+            if any(abs(hx - rx) <= 0.55 * space and abs(hy - ry) <= 0.7 * space
+                   for rx, ry in rowrun_all):
+                return True
+            return _head_end_ok(hx, hy, stem_boxes, beam_boxes, space)
+
+        blob_heads = [h for h in blob_heads if supported(h[0], h[1])]
     eroded_heads = _erosion_heads(ink, space)
     # The distance transform handles long stems and chords, the erosion
     # recovers heads swallowed by a beam, and templates are better for clean
     # single-note groups.  Prefer whichever finds more heads.
     heads = max((matched_heads, blob_heads, eroded_heads), key=len)
+    # Beams that slope into a head make it one thick blob with the beam, so
+    # the shape detectors above miss it.  Row-run clusters recover these,
+    # after requiring the candidate to sit at a stem end so beam fragments
+    # and accidental strokes are not taken for heads.  A wide glyph that was
+    # classified as a note may be a rest or a text figure; for those, only
+    # the shape detectors are trustworthy.
+    if use_rowrun:
+        for hx, hy in rowrun_valid:
+            if all(not (abs(hx - x) <= 0.55 * space
+                        and abs(hy - y) <= 0.7 * space)
+                   for x, y in heads):
+                heads.append((hx, hy))
     group_levels = sorted((by0 + by1) / 2 for _a, by0, _b, by1 in beam_boxes)
     group_count = 1
     if group_levels:

@@ -391,7 +391,8 @@ def cmd_read(args) -> int:
                                            clef, fifths, dots=dots, legacy=legacy,
                                            bar_length=bar,
                                            require_head=x_rhythm and not continuo,
-                                           recover_edges=args.source.startswith("bga"))
+                                           recover_edges=args.source.startswith("bga"),
+                                           beam_row_heads=continuo)
         for event in staff_events:
             event.measure += offset
         events.extend(staff_events)
@@ -495,7 +496,8 @@ def cmd_report(args) -> int:
                                                clef, fifths, dots=[],
                                                legacy=legacy, bar_length=bar,
                                                require_head=x_rhythm and not continuo,
-                                               recover_edges=args.source.startswith("bga"))
+                                               recover_edges=args.source.startswith("bga"),
+                                               beam_row_heads=continuo)
             for event in staff_events:
                 event.measure += offset
             events.extend(staff_events)

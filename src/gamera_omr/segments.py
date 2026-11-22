@@ -18,6 +18,9 @@ class Component:
     y0: int
     x1: int
     y1: int
+    # Set by `mark_head_like`: a compact ellipse whose stem is either a
+    # separate near-vertical fragment or part of a larger connected group.
+    head_like: bool = False
 
     @property
     def w(self) -> int:
@@ -54,8 +57,63 @@ def components(image) -> list[Component]:
     return out
 
 
+def _has_nearby_stem(c, comps: list[Component], space: float) -> bool:
+    """True when a vertical stroke touches or almost touches `c`.
+
+    Isolated noteheads keep a short stem fragment after staff-line removal;
+    rest blobs are accompanied by a short diagonal stroke instead, which is
+    wider than a stem for its height.
+    """
+    for s in comps:
+        if s is c:
+            continue
+        if not (s.w <= max(4.0, 0.45 * space)
+                and s.h >= max(0.5 * space, 2.0 * s.w)):
+            continue
+        if abs(s.cx - c.cx) > 0.9 * space:
+            continue
+        if s.y0 <= c.y1 + 0.6 * space and s.y1 >= c.y0 - 0.6 * space:
+            return True
+    return False
+
+
+def _inside_larger(c, comps: list[Component], space: float) -> bool:
+    """True when a larger component's box encloses `c`.
+
+    A notehead cut off from a beamed group sits inside that group's bounding
+    box; its stem is part of the group, so no separate stem exists.
+    """
+    tol = 0.25 * space
+    for s in comps:
+        if s is c:
+            continue
+        if s.h < 1.5 * space and s.w < 1.5 * space:
+            continue
+        if not (s.x0 - tol <= c.x0 and s.x1 + tol >= c.x1
+                and s.y0 - tol <= c.y0 and s.y1 + tol >= c.y1):
+            continue
+        if s.w > c.w + 0.5 * space or s.h > c.h + 0.5 * space:
+            return True
+    return False
+
+
+def mark_head_like(comps: list[Component], space: float):
+    """Flag compact notehead ellipses that still have a stem context."""
+    for c in comps:
+        aspect = c.w / max(1.0, c.h)
+        if not (0.45 * space <= c.h <= 1.1 * space
+                and 0.9 * space <= c.w <= 1.9 * space
+                and 1.1 <= aspect <= 3.0
+                and c.solidity >= 0.8):
+            c.head_like = False
+            continue
+        c.head_like = (_has_nearby_stem(c, comps, space)
+                       or _inside_larger(c, comps, space))
+
+
 def filter_components(comps: list[Component], staff: Staff):
     """Keep musical symbols; drop lyrics, noise, staff remnants and barlines."""
+    mark_head_like(comps, staff.space)
     top, bottom = staff.band(above=4.5, below=1.2)
     kept, dropped = [], {"outside": 0, "outside_x": 0, "tiny": 0, "text": 0,
                          "staffline": 0, "barline": 0}
@@ -74,13 +132,24 @@ def filter_components(comps: list[Component], staff: Staff):
             continue
         # Letters (lyrics) are short; noteheads+stems are at least ~2 spaces
         # tall, beams are wide.  Dots are picked up separately by the decoder.
+        # A notehead whose stem was cut away by staff-line removal is a
+        # compact, solid ellipse about half a space high; keep it only when
+        # `mark_head_like` found a stem context, so quarter-rest blobs and
+        # accidental fragments stay out.
         if c.h < 0.75 * staff.space and c.w < 1.5 * staff.space:
-            dropped["text"] += 1
-            continue
+            if not c.head_like:
+                dropped["text"] += 1
+                continue
         # A very tall, narrow component is a barline fragment or a column of
         # text.  A tall *wide* one can be a piano beamed group spanning the
         # whole staff and must not be discarded.
         if c.h > 10 * staff.space and c.w < 2.0 * staff.space:
+            dropped["text"] += 1
+            continue
+        # The system-start brace joins every staff; its column is a little
+        # wider than the strict limit above but still far taller than wide.
+        if (c.h > 8 * staff.space and c.w < 3.0 * staff.space
+                and c.h > 4.0 * c.w):
             dropped["text"] += 1
             continue
         # a staff-line remnant is a long, very thin horizontal stroke

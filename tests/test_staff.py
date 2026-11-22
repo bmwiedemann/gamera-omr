@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from gamera_omr import config
+from gamera_omr import config, segments
 from gamera_omr.segments import find_barlines, find_grand_barlines, measure_bounds
 from gamera_omr.stacks import load_stack
 from gamera_omr.staffs import Staff, find_staves, remove_staff_lines, validate_staves
@@ -123,3 +123,45 @@ def test_flush_bottom_barline_option():
     assert not any(abs(b - 301) <= 1.5 for b in find_barlines(arr, staff))
     bars = find_barlines(arr, staff, flush_bottom=True)
     assert any(abs(b - 301) <= 1.5 for b in bars)
+
+
+class _StubGlyph:
+    def __init__(self, ink):
+        self._ink = ink
+
+    def to_numpy(self):
+        return self._ink
+
+
+def _component(x0, y0, x1, y1, ink):
+    return segments.Component(_StubGlyph(ink), x0, y0, x1, y1)
+
+
+def test_isolated_notehead_needs_stem_context():
+    space = 20.0
+    lines = [40.0, 60.0, 80.0, 100.0, 120.0]
+    staff = Staff(0, lines, left=20, right=540, space=space, thickness=2.0)
+    head_ink = np.ones((12, 22), np.uint8)
+    head = _component(100, 84, 121, 95, head_ink)   # a compact filled head
+    stem = _component(118, 60, 121, 73,
+                      np.ones((14, 4), np.uint8))   # short vertical fragment
+    rest_stroke = _component(118, 60, 124, 70,
+                             np.ones((11, 7), np.uint8))  # too wide for a stem
+    rest_blob = _component(100, 84, 121, 95, head_ink)
+
+    kept, _ = segments.filter_components([head, stem], staff)
+    assert any(c is head for c in kept)
+
+    kept, dropped = segments.filter_components([rest_blob, rest_stroke], staff)
+    assert not any(c is rest_blob for c in kept)
+    assert dropped["text"] >= 1
+
+
+def test_system_brace_is_dropped():
+    space = 16.0
+    staff = Staff(0, [40.0, 56.0, 72.0, 88.0, 104.0], left=20, right=540,
+                  space=space, thickness=2.0)
+    brace = _component(200, 0, 233, 240, np.ones((241, 34), np.uint8))
+    kept, dropped = segments.filter_components([brace], staff)
+    assert not kept
+    assert dropped["text"] == 1

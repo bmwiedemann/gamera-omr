@@ -108,9 +108,57 @@ def test_erosion_heads_find_head_on_long_stem():
     assert 10 <= x <= 15 and 40 <= y <= 46
 
 
+def test_rowrun_heads_find_head_at_stem_end():
+    space = 10
+    ink = np.zeros((34, 56), np.uint8)
+    ink[0:4, 0:50] = 1           # beam, far too long to be a head
+    ink[0:30, 44:47] = 1         # stem
+    ink[20:29, 39:52] = 1        # filled head at the stem's free end
+    stems = [(44, 0, 46, 29, 45.0)]
+    heads = notes._rowrun_heads(ink, space, stems)
+    assert len(heads) == 1
+    x, y = heads[0]
+    assert 42 <= x <= 50 and 22 <= y <= 27
+    # The beam at the other end of the stem is not a head.
+    assert all(not (y < 8 and 20 <= x <= 50) for x, y in heads)
+
+
 def test_alternating_stem_directions_stay_one_voice():
     # A single line flips stem direction with the note's staff position.
     events = [_voice_event(10, "up"), _voice_event(40, "down"),
               _voice_event(70, "up"), _voice_event(100, "down")]
     assert decode.split_staff_voices(events, space=10) is None
     assert {e.voice for e in events} == {0}
+
+
+def test_continuo_pickup_and_signature(tmp_path):
+    # The movement-8 first continuo crop prints an incipit pickup before the
+    # clef/key/time signature.  The pickup head is isolated by staff-line
+    # removal (classified text), and the signature digits must not become
+    # notes.
+    import pytest
+    from pathlib import Path
+    from gamera_omr import classify, config, deskew, glyphs, segments
+
+    crop = config.WORK / "mvt" / "8" / "crops" / "nba" / "p-047-g0-C.png"
+    if not crop.exists():
+        pytest.skip(f"missing test image {crop}")
+    page, staves, _diag = deskew.prepare_page(
+        str(crop), backend="auto", enabled=True, flush_bottom_barlines=True,
+        reject_stem_barlines=True)
+    items = glyphs.extract(page, staves, repair=True)
+    glyphs.save_corpus(items, tmp_path)
+    preds = classify.predict(classify.load_model(
+        Path("models/common/model.xml")), tmp_path)
+    staff = staves[0]
+    bounds = segments.measure_bounds(
+        staff, segments.find_barlines(page.array(), staff,
+                                      flush_bottom=True, reject_stems=True))
+    events = decode.decode_staff(
+        staff, items, preds, bounds, config.clef("nba", "B"),
+        config.key_fifths(8) or 0, dots=[], bar_length=Fraction(1, 2),
+        beam_row_heads=True)
+    first = {e.name for e in events if e.kind == "note" and e.measure == 0}
+    second = {e.name for e in events if e.kind == "note" and e.measure == 1}
+    assert first == {"C#3"}
+    assert second == {"D3", "D2"}

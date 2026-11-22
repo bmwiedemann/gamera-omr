@@ -30,6 +30,9 @@ class Glyph:
     y1: int
     space: float
     ink: np.ndarray = field(repr=False)  # 2-D uint8, 1 = ink, bbox-sized
+    # A staff-removed isolated notehead (shape and stem context verified by
+    # segments.mark_head_like); such glyphs are often classified as text.
+    head_like: bool = False
 
     @property
     def w(self) -> int:
@@ -63,7 +66,7 @@ def extract(page, staves: list[Staff], page_name: str | None = None,
             ink = (ink > 0).astype("uint8")
             uid = f"{name}-s{staff.index}-{c.x0}-{c.y0}"
             out.append(Glyph(uid, name, staff.index, c.x0, c.y0, c.x1, c.y1,
-                             staff.space, ink))
+                             staff.space, ink, head_like=c.head_like))
     return out
 
 

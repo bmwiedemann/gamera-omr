@@ -143,7 +143,14 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
                  require_head: bool = False,
                  recover_edges: bool = False,
                  clef_changes: list[tuple[float, str]] | None = None,
-                 voices: bool = False) -> list[Event]:
+                 voices: bool = False,
+                 beam_row_heads: bool = False) -> list[Event]:
+    """Decode one staff's glyphs into note events.
+
+    `beam_row_heads` enables the row-run detector for heads fused to a sloping
+    beam; it is used for the NBA continuo crops, where it is reliable, and is
+    off for the old prints, whose system-start clefs it can mistake for groups.
+    """
     from . import notes as notes_module  # local import avoids a cycle
 
     if templates is None:
@@ -158,6 +165,35 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
             else:
                 break
         return chosen
+
+    band_top, band_bottom = staff.band(above=4.0, below=1.2)
+    # The clef, key and time signature at the start of a system are tall and
+    # narrow like a note+stem.  Find where the printed music really starts;
+    # only glyphs before that which contain no notehead are signature glyphs.
+    signature_limit = None
+    if templates:
+        for g in glyphs:
+            if g.staff != staff.index:
+                continue
+            if not (band_top <= g.cy <= band_bottom):
+                continue
+            label = predictions.get(g.uid, {}).get("label", "skip")
+            if label == "beam.group":
+                if g.w < 2.5 * staff.space:
+                    continue
+                if len(notes_module.split_beam_group(
+                        g.ink, g.space, templates,
+                        use_rowrun=beam_row_heads)) < 2:
+                    continue
+                x = g.cx
+            elif label in ("note.black", "note.open"):
+                if not notes_module.match_heads(g.ink, g.space, templates):
+                    continue
+                x = g.cx
+            else:
+                continue
+            signature_limit = x if signature_limit is None else min(
+                signature_limit, x)
 
     def measure_of(x: float) -> int | None:
         if not bounds:
@@ -181,7 +217,6 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
     for g in glyphs:
         if g.staff != staff.index:
             continue
-        band_top, band_bottom = staff.band(above=4.0, below=1.2)
         if not (band_top <= g.cy <= band_bottom):
             continue
         # A clef (and the initial key/time signature) is a tall, narrow glyph
@@ -189,6 +224,10 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
         # as a note.  Skip that zone (the first real note is further right).
         if (g.cx < staff.left + 3.0 * staff.space
                 and g.h >= 2.5 * staff.space and g.w <= 1.6 * staff.space):
+            continue
+        if (signature_limit is not None and g.cx < signature_limit
+                and g.h >= 2.2 * staff.space and g.w <= 1.6 * staff.space
+                and not notes_module.match_heads(g.ink, g.space, templates)):
             continue
         label = predictions.get(g.uid, {}).get("label", "skip")
         wide_note = False
@@ -211,7 +250,9 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
                                     hy=g.y0 + g.h / 2))
             continue
         if label == "beam.group" or wide_note:
-            heads = notes_module.split_beam_group(g.ink, g.space, templates)
+            heads = notes_module.split_beam_group(
+                g.ink, g.space, templates,
+                use_rowrun=beam_row_heads and not wide_note)
             # Only a genuinely polyphonic wide glyph is a misclassified
             # beamed group.  A single split head from a wide note+slur is a
             # false positive in the NBA/Rösler/Sibley prints.
@@ -237,7 +278,8 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
             # contains noteheads, so split it like a beamed group.
             if (voices and label in ("text", "skip")
                     and g.w >= 2.0 * g.space and g.h >= 2.5 * g.space):
-                heads = notes_module.split_beam_group(g.ink, g.space, templates)
+                heads = notes_module.split_beam_group(
+                    g.ink, g.space, templates, use_rowrun=beam_row_heads)
                 if len(heads) >= 2:
                     direction = notes_module.stem_direction(g.ink, g.space)
                     for hx, hy, head_duration in heads:
@@ -250,6 +292,24 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
                             events.append(Event(
                                 measure, x, pitch, head_duration, "note", g,
                                 flexible=True, hy=head_y, direction=direction))
+                    continue
+            # Staff-line removal can cut an isolated notehead away from its
+            # stem; the remaining blob is a solid ellipse and the classifier
+            # calls it text.  `head_like` verifies both shape and stem context.
+            if label in ("text", "skip") and g.head_like:
+                fill, cy, h, w = head_fill(g.ink, g.space)
+                if w >= 0.8 * g.space:
+                    duration = Fraction(1) if fill >= 0.6 else Fraction(2)
+                    head_y = g.y0 + cy
+                    position = staff_position(staff, head_y)
+                    pitch = pitch_at(staff, clef_at(g.cx), position, fifths)
+                    measure = measure_of(g.cx)
+                    if measure is not None:
+                        events.append(Event(measure, g.cx, pitch, duration,
+                                            "note", g, flexible=True,
+                                            hy=head_y,
+                                            direction=(notes_module.stem_direction(
+                                                g.ink, g.space) if voices else None)))
                     continue
             # A notehead merged with a slur/fermata is classified slur/text;
             # the tall narrow glyph still contains the head.  A bare stem or

@@ -183,7 +183,7 @@ hand).  The homr reference for this system has 44 note/chord elements and 14
 chords; the pitch agreement is about 0.80, close but still less complete.
 On the 20 systems of the movement-8 piano reduction all measure counts now
 match homr (previously 13/20); empty measures dropped from 9/13 to 2/2
-(right/left hand) and lower-hand agreement is about 55 %.  Known gaps: voices
+(right/left hand) and lower-hand agreement is about 56 %.  Known gaps: voices
 beyond the two stem directions in a staff are not separated, C clefs are not
 classified, and grand-staff deskewing is not implemented.
 
@@ -196,10 +196,11 @@ Scored against the checked NBA-derived readings (`partitur/BWV248/gemeinfrei/...
 |---|---|---|---|---|---|
 | Nr. 5 Choral, soprano | NBA, 1960 | 45 | 44 | **0.97** | **0.99** |
 | Nr. 5 Choral, soprano | BGA, 1856 | 45 | 38 | 0.31 | 0.63 |
-| Nr. 12 Choral, soprano | NBA, 1960 | 49 | 46 | 0.44 | 0.80 |
+| Nr. 5 Choral, bass | NBA, 1960 | 56 | 50 | 0.70 | 0.85 |
+| Nr. 12 Choral, soprano | NBA, 1960 | 49 | 46 | 0.69 | 0.88 |
 | Nr. 1, soprano page 1 | BGA, 1856 | 15 | 19 | 0.53 | 0.59 |
-| Nr. 1, soprano page 1 | Rösler, c.1900 | 105 | 86 | 0.37 | 0.73 |
-| Nr. 1, soprano page 1 | Sibley, c.1900 | 74 | 100 | 0.34 | 0.59 |
+| Nr. 1, soprano page 1 | Rösler, c.1900 | 106 | 90 | 0.38 | 0.73 |
+| Nr. 1, soprano page 1 | Sibley, c.1900 | 74 | 107 | 0.35 | 0.62 |
 
 The 1900s scores are far more variable than NBA.  Rest placement is now structural
 (empty measures become rests, printed rests are classified, gaps become rests), and
@@ -241,11 +242,35 @@ on the 1900s prints.
   including a pair whose two strokes both touch the opening incipit's beam.
   The movement 8 continuo now reads 6–7 measures per system instead of 15–17;
   all 18 evaluated crops have the same measure count as homr, and note agreement
-  with the piano left hand rose from 47 % to 68 %.
+  with the piano left hand rose from 47 % to 76 %.
+- **Heads cut off from their stems (continuo).**  Staff-line removal often
+  leaves a filled notehead as its own component, classified `text`; the old
+  text filter dropped it.  `segments.mark_head_like` keeps a compact solid
+  ellipse only when a stem fragment is next to it or its box lies inside a
+  larger connected group (the beamed group it was cut from).  Those glyphs are
+  emitted as notes, fed into the notehead templates, and used to reject rest
+  blobs and accidental fragments.  A sloping beam that runs into a head makes
+  one thick blob with it; a row-run detector finds rows whose ink run is about
+  head-wide, keeps only candidates at a stem's free end, and merges them with
+  the template/distance/erosion heads.  This pass is enabled for continuo
+  crops only, because on the BGA/Rösler prints it mistook a system-start
+  clef for a beamed group.
+- **Opening clef/key/time signature.**  When an incipit is printed before the
+  first full measure, the clef, key and time signature sit in the first
+  measure's x range.  The decoder finds where the printed music starts (the
+  first beam group with split heads or a note whose head matches the page's
+  templates) and skips the tall/narrow signature glyphs before it unless they
+  contain a matched head.  A separate filter drops the tall wide brace at a
+  system start.
+- Directly against homr on the movement-8 continuo, 392 of homr's 473 notes
+  now find a note on the same beat (was 303); 325 have the same pitch class
+  and 310 the same octave (was 219 and 191).  466 notes are emitted, against
+  homr's 473.  Three measures remain empty: one incipit whose notes are fused
+  with the clefs, and two fermata/rest measures.
 - **Continuo crops (`*-C.png`)** are read as a monophonic continuo line:
   noteheads split by staff-line removal are repaired, and onsets come from the
   printed x positions.  Full NBA pages of voice B keep the old cumulative
-  rhythm, which scores better there (note F1 0.61 vs 0.44 with x-rhythm).
+  rhythm, which scores better there than x-rhythm.
 - Older prints use a class-primary quarter/half decision (`legacy=True`), because their
   open noteheads often have an inked counter; modern NBA prints use the ink-ratio rule.
 
