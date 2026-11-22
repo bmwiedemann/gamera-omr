@@ -76,7 +76,8 @@ def cmd_debug(args) -> int:
 
 def cmd_corpus(args) -> int:
     page, staves, diag = _prepare(args)
-    items = glyphs.extract(page, staves)
+    items = glyphs.extract(page, staves,
+                           repair=getattr(args, "repair_crossings", False))
     out = Path(args.out)
     glyphs.save_corpus(items, out)
     print(f"{len(items)} glyphs from {page.path.name} "
@@ -355,6 +356,8 @@ def main(argv=None) -> int:
     p.add_argument("--backend", default="auto", choices=["auto", "projections", "miyao"])
     p.add_argument("--no-deskew", action="store_true",
                    help="do not correct per-system skew before processing")
+    p.add_argument("--repair-crossings", action="store_true",
+                   help="rejoin noteheads split by staff-line removal")
     p.set_defaults(func=cmd_corpus)
 
     p = sub.add_parser("sheet", help="cluster a corpus and write a contact sheet")
