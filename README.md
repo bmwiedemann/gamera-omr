@@ -138,10 +138,25 @@ read with `--source piano`:
   stems and beams are thin; several heads on one long stem become a chord.  The
   old `w <= 0.6*space` stem filter is relaxed to an aspect-ratio test so long
   stems are not discarded, and the tall-component filter keeps wide tall
-  glyphs, since a piano beamed group can span the whole staff.
+  glyphs, since a piano beamed group can span the whole staff.  An erosion
+  pass with a head-sized elliptical kernel recovers heads that are fused to
+  a thick beam (their distance-transform blob would be the whole stem); it is
+  only used when it finds more heads than the other detectors.
 - Notehead repair is on for piano as well: a head sitting on a staff line was
   cut in half and looked like an open/partial head, defeating both blob
   detection and pitch.
+- **Grand staff segmentation.**  A grand-staff barline joins both staves, so
+  after line removal every note touching it became one component spanning the
+  staves and was dropped by both staff bands.  Piano reads cut the detected
+  grand-barline columns before component analysis.  Grand barlines also merge
+  scan gaps up to 0.6 staff space and accept strokes that start/end a little
+  short, which fixes systems whose bars are interrupted by a beam or a white
+  speck.  If the OpenCV oracle extent fails validation (one system on a page
+  can have a short extent), staff finding retries with the finder's extents
+  refined from the image instead of failing.
+- A large piano figure can be one connected component of stacked chords and
+  beams classified as `text`; if it is at least two staff spaces wide and 2.5
+  tall, its noteheads are split out like a beamed group.
 - Simultaneous heads within `0.6*space` share an onset and duration, and the
   MusicXML writer emits them as chords.
 - **Independent voices are separated by stem direction.**  Stems, beams and
@@ -166,8 +181,10 @@ barline test removed long stems mistaken for bars) and 60 note events (49 note
 or chord elements, 11 chords, with a 32nd-note run in the last measure of each
 hand).  The homr reference for this system has 44 note/chord elements and 14
 chords; the pitch agreement is about 0.80, close but still less complete.
-`p-050-s0` reads 46 note events over 7 measures.  Known gaps: voices beyond
-the two stem directions in a staff are not separated, C clefs are not
+On the 20 systems of the movement-8 piano reduction all measure counts now
+match homr (previously 13/20); empty measures dropped from 9/13 to 2/2
+(right/left hand) and lower-hand agreement is about 55 %.  Known gaps: voices
+beyond the two stem directions in a staff are not separated, C clefs are not
 classified, and grand-staff deskewing is not implemented.
 
 ## Current results
@@ -219,10 +236,16 @@ on the 1900s prints.
 - **Barlines vs. long stems (NBA).**  NBA continuo pages draw barlines flush with
   the bottom line, while the stems of beamed eighths can span the whole staff.
   For `source=nba`, a stroke ending on the bottom line is accepted, and a
-  full-height stroke that a notehead or beam joins horizontally is rejected as a
-  stem; a rejected stroke belonging to a double bar stays with its partner.  The
-  movement 8 continuo now reads 6–7 measures per system instead of 15–17.  Other
-  sources keep the previous barline rules.
+  full-height stroke joined to a beam/notehead is rejected as a stem (wide
+  horizontal runs over at least three rows); double-bar partners are restored,
+  including a pair whose two strokes both touch the opening incipit's beam.
+  The movement 8 continuo now reads 6–7 measures per system instead of 15–17;
+  all 18 evaluated crops have the same measure count as homr, and note agreement
+  with the piano left hand rose from 47 % to 68 %.
+- **Continuo crops (`*-C.png`)** are read as a monophonic continuo line:
+  noteheads split by staff-line removal are repaired, and onsets come from the
+  printed x positions.  Full NBA pages of voice B keep the old cumulative
+  rhythm, which scores better there (note F1 0.61 vs 0.44 with x-rhythm).
 - Older prints use a class-primary quarter/half decision (`legacy=True`), because their
   open noteheads often have an inked counter; modern NBA prints use the ink-ratio rule.
 

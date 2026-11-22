@@ -310,22 +310,32 @@ def default_model(source: str) -> Path:
 def cmd_read(args) -> int:
     page, staves, diag = _prepare(args)
     legacy = not args.source.startswith("nba")
-    repair = ((args.source in ("sibley", "piano") or args.repair_crossings)
+    piano = args.source == "piano"
+    continuo = (args.source == "nba" and args.voice in ("B", "C")
+                and page.path.stem.endswith("-C"))
+    repair = ((args.source in ("sibley", "piano") or continuo
+               or args.repair_crossings)
               and not args.no_repair_crossings)
-    items = glyphs.extract(page, staves, repair=repair)
+    arr = page.array()
+    piano_barlines = []
+    if piano:
+        for i in range(0, len(staves) - 1, 2):
+            piano_barlines.extend(
+                segments.find_grand_barlines(arr, staves[i], staves[i + 1]))
+    items = glyphs.extract(page, staves, repair=repair,
+                           cut_barlines=piano_barlines)
     with tempfile.TemporaryDirectory() as td:
         corpus = Path(td)
         glyphs.save_corpus(items, corpus)
         predictions, _model_path = _load_predictions(corpus, args, args.source)
 
-    piano = args.source == "piano"
     clef = "G2" if piano else config.clef(args.source, args.voice)
     fifths = config.key_fifths(args.movement) or 0
     time_signature = config.time_signature(args.movement)
-    arr = page.array()
-    forced_x = args.source in ("rosler", "sibley")
+    forced_x = args.source in ("rosler", "sibley") or continuo
     x_rhythm = forced_x
-    cleaned = remove_staff_lines(page, staves, repair=repair)
+    cleaned = remove_staff_lines(page, staves, repair=repair,
+                                 cut_barlines=piano_barlines)
     all_comps = segments.components(cleaned.image)
     dots = []
     if not args.no_dots:
@@ -379,7 +389,8 @@ def cmd_read(args) -> int:
                         tacet.add(offset + i)
         staff_events = decode.decode_staff(staff, items, predictions, bounds,
                                            clef, fifths, dots=dots, legacy=legacy,
-                                           bar_length=bar, require_head=x_rhythm,
+                                           bar_length=bar,
+                                           require_head=x_rhythm and not continuo,
                                            recover_edges=args.source.startswith("bga"))
         for event in staff_events:
             event.measure += offset
@@ -393,7 +404,8 @@ def cmd_read(args) -> int:
     if forced_x or auto_x:
         events = decode.assign_onsets_from_x(
             events, bounds_all, bar,
-            anchor=args.source in ("rosler", "bga", "bga2"))
+            anchor=(args.source in ("rosler", "bga", "bga2")
+                    or continuo))
     else:
         decode.fit_durations(events, offset, bar)
         events = decode.assign_onsets(events, offset, bar)
@@ -415,23 +427,33 @@ def cmd_report(args) -> int:
     """Per-page reliability metrics; flags pages that need manual review."""
     page, staves, diag = _prepare(args)
     legacy = not args.source.startswith("nba")
-    repair = ((args.source in ("sibley", "piano") or args.repair_crossings)
+    continuo = (args.source == "nba" and args.voice in ("B", "C")
+                and page.path.stem.endswith("-C"))
+    repair = ((args.source in ("sibley", "piano") or continuo
+               or args.repair_crossings)
               and not args.no_repair_crossings)
-    items = glyphs.extract(page, staves, repair=repair)
+    arr = page.array()
+    piano = args.source == "piano"
+    piano_barlines = []
+    if piano:
+        for i in range(0, len(staves) - 1, 2):
+            piano_barlines.extend(
+                segments.find_grand_barlines(arr, staves[i], staves[i + 1]))
+    items = glyphs.extract(page, staves, repair=repair,
+                           cut_barlines=piano_barlines)
     with tempfile.TemporaryDirectory() as td:
         corpus = Path(td)
         glyphs.save_corpus(items, corpus)
         predictions, model_path = _load_predictions(corpus, args, args.source)
 
-    arr = page.array()
-    cleaned = remove_staff_lines(page, staves, repair=repair)
+    cleaned = remove_staff_lines(page, staves, repair=repair,
+                                 cut_barlines=piano_barlines)
     all_comps = segments.components(cleaned.image)
-    piano = args.source == "piano"
     clef = "G2" if piano else config.clef(args.source, args.voice)
     fifths = config.key_fifths(args.movement) or 0
     time_signature = config.time_signature(args.movement)
     bar = Fraction(meter.TimeSignature(time_signature).barDuration.quarterLength)
-    forced_x = args.source in ("rosler", "sibley")
+    forced_x = args.source in ("rosler", "sibley") or continuo
     x_rhythm = forced_x
 
     if piano:
@@ -472,7 +494,7 @@ def cmd_report(args) -> int:
             staff_events = decode.decode_staff(staff, items, predictions, bounds,
                                                clef, fifths, dots=[],
                                                legacy=legacy, bar_length=bar,
-                                               require_head=x_rhythm,
+                                               require_head=x_rhythm and not continuo,
                                                recover_edges=args.source.startswith("bga"))
             for event in staff_events:
                 event.measure += offset
@@ -486,7 +508,8 @@ def cmd_report(args) -> int:
         if forced_x or auto_x:
             events = decode.assign_onsets_from_x(
                 events, bounds_all, bar,
-                anchor=args.source in ("rosler", "bga", "bga2"))
+                anchor=(args.source in ("rosler", "bga", "bga2")
+                        or continuo))
         else:
             decode.fit_durations(events, offset, bar)
             events = decode.assign_onsets(events, offset, bar)

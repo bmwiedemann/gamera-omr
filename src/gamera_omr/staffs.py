@@ -195,6 +195,15 @@ def find_staves(page: StackPage, backend: str = "auto", *,
             for staff in staves:
                 refine_extent(page, staff)
         ok, reasons = validate_staves(staves, page.image)
+        if not ok and allow_oracle:
+            # The oracle extents can be wrong (notably on a grand staff);
+            # retry with the finder's own extents refined from this image.
+            retry = _run_finder(page.image, name)
+            for staff in retry:
+                refine_extent(page, staff)
+            retry_ok, retry_reasons = validate_staves(retry, page.image)
+            if retry_ok:
+                staves, ok, reasons = retry, retry_ok, retry_reasons
         tried.append({
             "backend": name,
             "staves": len(staves),
@@ -339,7 +348,8 @@ def _repair_line_crossings(arr: np.ndarray, staff: Staff):
 
 
 def remove_staff_lines(page: StackPage, staves: list[Staff], tolerance: float = 1.0,
-                       *, repair: bool = False):
+                       *, repair: bool = False,
+                       cut_barlines: list[float] | None = None):
     """Return a new image with the staff lines removed.
 
     A column's black run is erased when it is no thicker than the line plus
@@ -379,4 +389,15 @@ def remove_staff_lines(page: StackPage, staves: list[Staff], tolerance: float = 
     for staff in staves:
         if repair:
             _repair_line_crossings(arr, staff)
+    # A grand-staff barline joins the two staves, so after line removal every
+    # note touching it becomes one component spanning both staves and is
+    # dropped by both staff bands.  Cutting the barline columns keeps the
+    # notes on their own staff.
+    if cut_barlines:
+        h, w = arr.shape
+        for staff in staves:
+            half = max(1, int(round(0.15 * staff.space)))
+            for centre in cut_barlines:
+                x = int(round(centre))
+                arr[:, max(0, x - half):min(w, x + half + 1)] = 0
     return from_array(arr, page)
