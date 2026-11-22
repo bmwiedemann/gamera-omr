@@ -121,7 +121,8 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
                  fifths: int = 0, templates=None,
                  dots: list[tuple[float, float]] | None = None,
                  legacy: bool = False,
-                 bar_length: Fraction = Fraction(4)) -> list[Event]:
+                 bar_length: Fraction = Fraction(4),
+                 require_head: bool = False) -> list[Event]:
     from . import notes as notes_module  # local import avoids a cycle
 
     if templates is None:
@@ -197,6 +198,15 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
                                             "note", g, hy=head_y))
             continue
         head_y = g.y0 + head_center(g.ink, g.space)
+        # A rest or ornament misclassified as a note has no notehead that
+        # matches the page's notehead templates; do not emit it as a note.
+        if require_head and templates:
+            if (not notes_module.match_heads(g.ink, g.space, templates)
+                    and g.w <= 1.1 * g.space and g.h >= 0.8 * g.space):
+                # A narrow, tall headless glyph is a rest or accidental; a
+                # wide headless one is usually a note merged with a slur and
+                # is kept (the slur/text recovery handles those separately).
+                continue
         position = staff_position(staff, head_y)
         pitch = pitch_at(staff, clef, position, fifths)
         measure = None
@@ -223,6 +233,82 @@ def apply_dots(events: list[Event], dots: list[tuple[float, float]], space: floa
                     and abs(dot_y - event.hy) <= 0.45 * space):
                 event.duration = event.duration * Fraction(3, 2)
                 break
+
+
+def assign_onsets_from_x(events: list[Event], bounds: list[tuple[float, float]],
+                         bar_length: Fraction,
+                         grid: Fraction = Fraction(1, 4)) -> list[Event]:
+    """Place notes by their printed x position, fill the gaps with rests.
+
+    The horizontal position of a notehead is a reliable rhythm cue even when
+    the rest glyphs are missed (or the edition prints them unusually).  The
+    glyph duration caps the note; any remaining gap becomes a rest.
+    """
+    by_measure: dict[int, list[Event]] = {i: [] for i in range(len(bounds))}
+    for event in events:
+        if event.kind == "note":
+            by_measure[event.measure].append(event)
+    out = []
+    for measure, (x0, x1) in enumerate(bounds):
+        notes = sorted(by_measure[measure], key=lambda e: e.x)
+        if not notes:
+            rest = next((e for e in events
+                         if e.measure == measure and e.kind == "rest"), None)
+            out.append(rest or Event(measure, x0, None, bar_length, "rest"))
+            continue
+        span = max(1.0, float(x1 - x0))
+        limit = bar_length - grid if bar_length >= grid else bar_length
+        onsets = []
+        for event in notes:
+            frac = Fraction((event.x - x0) / span).limit_denominator(64)
+            steps = round(frac * bar_length / grid)
+            onsets.append(min(max(Fraction(steps) * grid, Fraction(0)), limit))
+        for i in range(1, len(onsets)):
+            if onsets[i] <= onsets[i - 1]:
+                onsets[i] = min(onsets[i - 1] + grid, limit)
+        if onsets[0] > 0:
+            rest = Event(measure, x0, None, onsets[0], "rest")
+            rest.onset = Fraction(0)
+            out.append(rest)
+        for i, event in enumerate(notes):
+            event.onset = onsets[i]
+            gap = (onsets[i + 1] if i + 1 < len(notes) else bar_length) - onsets[i]
+            if event.duration is None or event.duration <= 0:
+                event.duration = gap
+            if event.duration > gap:
+                event.duration = gap
+            if event.duration <= 0:
+                event.duration = grid
+            out.append(event)
+            if gap > event.duration:
+                rest = Event(measure, event.x + 1.0, None,
+                             gap - event.duration, "rest")
+                rest.onset = event.onset + event.duration
+                out.append(rest)
+    return out
+
+
+def normalize_measures(events: list[Event], nmeasures: int,
+                       bar_length: Fraction,
+                       tacet: set[int] | None = None) -> list[Event]:
+    """A measure without notes is a tacet measure: one full-measure rest.
+
+    `tacet` may name measures with a printed whole-rest bar; any notes found
+    there are misclassifications and are dropped.
+    """
+    tacet = tacet or set()
+    by_measure: dict[int, list[Event]] = {i: [] for i in range(nmeasures)}
+    for event in events:
+        by_measure[event.measure].append(event)
+    out = []
+    for measure in range(nmeasures):
+        if measure in tacet:
+            out.append(Event(measure, 0.0, None, bar_length, "rest"))
+        elif any(e.kind == "note" for e in by_measure[measure]):
+            out.extend(by_measure[measure])
+        else:
+            out.append(Event(measure, 0.0, None, bar_length, "rest"))
+    return out
 
 
 def fit_durations(events: list[Event], nmeasures: int, bar_length: Fraction):

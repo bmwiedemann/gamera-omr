@@ -7,6 +7,32 @@ Status: **Stage 1 + first reader** — Python 3.13 port, staff finding/validatio
 staff-line removal, connected-component segmentation, barline/measure detection, a
 kNN glyph classifier, note/beam decoding, MusicXML output, and debug overlays.
 
+## Rest detection (Rösler/Sibley first)
+
+The 1900s vocal scores are rest-heavy, so rests are now handled before anything else:
+
+- a measure with no detected notes becomes one **full-measure rest**;
+- a solid, short, **centred rest bar** (whole/half rest) marks a tacet measure, even
+  when the classifier produced false notes there (Rösler/Sibley);
+- for Rösler/Sibley the **printed x position** of each notehead sets the onset;
+  the remaining gaps become rests.  Notes are capped by their glyph duration, so a
+  quarter followed by a rest yields a quarter plus a rest, not a long note;
+- rest and note durations are split into standard note values (e.g. 5/4 = 1 + 1/4,
+  with ties) so MusicXML export always succeeds.
+
+Measured on the 1900s pages (the first page starts at printed bar 33; truth =
+`data/01/voices/S.json` measures 33+):
+
+| page | truth notes | omr notes | rests | measure fills correct | note F1 | pitch F1 |
+|---|---|---|---|---|---|---|
+| Rösler soprano p1 (bars 33–61) | 74 | 45 | 27 | 27/29 | 0.22 | 0.40 |
+| Sibley soprano p1 (bars 33–58) | 65 | 32 | 28 | 23/26 | 0.10 | 0.33 |
+
+Rest placement is now structurally sound (all 29/26 measures carry rests, and nearly
+all measures sum to 3/8); the remaining note F1 is limited by the common (NBA) glyph
+model on these fonts.  Per-font models and symbol-level quarter/eighth-rest classes are
+the next step.  NBA output is unchanged at note F1 0.95 / pitch F1 0.98.
+
 ## Current results
 
 Scored against the checked NBA-derived readings (`partitur/BWV248/gemeinfrei/...`) with

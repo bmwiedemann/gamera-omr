@@ -150,6 +150,7 @@ def cmd_read(args) -> int:
     time_signature = config.time_signature(args.movement)
     arr = page.array()
     legacy = not args.source.startswith("nba")
+    x_rhythm = args.source in ("rosler", "sibley")
     cleaned = remove_staff_lines(page, staves)
     all_comps = segments.components(cleaned.image)
     dots = []
@@ -163,20 +164,33 @@ def cmd_read(args) -> int:
                     dots.append((c.cx, c.cy))
     events = []
     offset = 0
+    bounds_all = []
+    tacet = set()
     bar = Fraction(meter.TimeSignature(time_signature).barDuration.quarterLength)
     for staff in staves:
         barlines = segments.find_barlines(arr, staff)
         bounds = segments.measure_bounds(staff, barlines)
+        bounds_all.extend(bounds)
+        if x_rhythm:
+            for c in segments.find_rest_bars(all_comps, staff):
+                for i, (x0, x1) in enumerate(bounds):
+                    if (x0 <= c.cx < x1
+                            and abs(c.cx - (x0 + x1) / 2) <= 0.25 * (x1 - x0)):
+                        tacet.add(offset + i)
         staff_events = decode.decode_staff(staff, items, predictions, bounds,
                                            clef, fifths, dots=dots, legacy=legacy,
-                                           bar_length=bar)
+                                           bar_length=bar, require_head=x_rhythm)
         for event in staff_events:
             event.measure += offset
         events.extend(staff_events)
         offset += len(bounds)
 
-    decode.fit_durations(events, offset, bar)
-    events = decode.assign_onsets(events, offset, bar)
+    events = decode.normalize_measures(events, offset, bar, tacet=tacet)
+    if x_rhythm:
+        events = decode.assign_onsets_from_x(events, bounds_all, bar)
+    else:
+        decode.fit_durations(events, offset, bar)
+        events = decode.assign_onsets(events, offset, bar)
     fills = decode.measure_fill(events, offset, bar)
     out = musicxml.write(events, offset, clef, fifths, time_signature,
                          args.out, args.voice)
@@ -210,27 +224,42 @@ def cmd_report(args) -> int:
     time_signature = config.time_signature(args.movement)
     bar = Fraction(meter.TimeSignature(time_signature).barDuration.quarterLength)
     legacy = not args.source.startswith("nba")
+    x_rhythm = args.source in ("rosler", "sibley")
 
     events: list = []
     drops, barlines, measures = {}, {}, {}
     offset = 0
+    bounds_all = []
+    tacet = set()
     for staff in staves:
         _kept, dropped = segments.filter_components(all_comps, staff)
         drops[str(staff.index)] = dropped
         bars = segments.find_barlines(arr, staff)
         bounds = segments.measure_bounds(staff, bars)
+        bounds_all.extend(bounds)
+        if x_rhythm:
+            for c in segments.find_rest_bars(all_comps, staff):
+                for i, (x0, x1) in enumerate(bounds):
+                    if (x0 <= c.cx < x1
+                            and abs(c.cx - (x0 + x1) / 2) <= 0.25 * (x1 - x0)):
+                        tacet.add(offset + i)
         barlines[str(staff.index)] = len(bars)
         measures[str(staff.index)] = len(bounds)
         staff_events = decode.decode_staff(staff, items, predictions, bounds,
                                            clef, fifths, dots=[],
-                                           legacy=legacy, bar_length=bar)
+                                           legacy=legacy, bar_length=bar,
+                                           require_head=x_rhythm)
         for event in staff_events:
             event.measure += offset
         events.extend(staff_events)
         offset += len(bounds)
 
-    decode.fit_durations(events, offset, bar)
-    events = decode.assign_onsets(events, offset, bar)
+    events = decode.normalize_measures(events, offset, bar, tacet=tacet)
+    if x_rhythm:
+        events = decode.assign_onsets_from_x(events, bounds_all, bar)
+    else:
+        decode.fit_durations(events, offset, bar)
+        events = decode.assign_onsets(events, offset, bar)
     fills = decode.measure_fill(events, offset, bar)
     mismatches = [(i + 1, str(s)) for i, s in enumerate(fills) if s != bar]
 

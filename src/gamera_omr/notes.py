@@ -204,6 +204,12 @@ def make_templates(glyphs, predictions, limit: int = 12):
         tpl = head_template(g.ink, g.space)
         if tpl is None:
             continue
+        # A notehead is about one staff space in both directions; a rest,
+        # accidental or clef leaf makes a very different template.
+        h, w = tpl.shape
+        if not (0.4 * g.space <= w <= 1.8 * g.space
+                and 0.4 * g.space <= h <= 1.6 * g.space):
+            continue
         key = (tpl.shape, int(tpl.sum()))
         if key in seen:
             continue

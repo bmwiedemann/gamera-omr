@@ -39,6 +39,11 @@ class Component:
     def area(self) -> int:
         return self.w * self.h
 
+    @property
+    def solidity(self) -> float:
+        ink = np.asarray(self.glyph.to_numpy())
+        return float((ink > 0).sum()) / max(1, self.area)
+
 
 def components(image) -> list[Component]:
     out = []
@@ -81,6 +86,20 @@ def filter_components(comps: list[Component], staff: Staff):
             continue
         kept.append(c)
     return kept, dropped
+
+
+def find_rest_bars(comps: list[Component], staff: Staff) -> list[Component]:
+    """Solid, short horizontal bars: whole/half (measure) rests."""
+    top, bottom = staff.band(above=4.0, below=1.2)
+    bars = []
+    for c in comps:
+        if not (top <= c.cy <= bottom):
+            continue
+        if (0.35 * staff.space <= c.w <= 1.8 * staff.space
+                and 0.12 * staff.space <= c.h <= 0.5 * staff.space
+                and c.solidity >= 0.6):
+            bars.append(c)
+    return bars
 
 
 def find_barlines(arr: np.ndarray, staff: Staff) -> list[float]:
