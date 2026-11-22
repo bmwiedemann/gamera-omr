@@ -105,8 +105,57 @@ def find_rest_bars(comps: list[Component], staff: Staff) -> list[Component]:
     return bars
 
 
+def _attached_stroke(arr: np.ndarray, staff: Staff, x0: int, x1: int) -> bool:
+    """True when horizontal ink touches a full-height vertical candidate.
+
+    A real barline is a bare vertical stroke.  A long stem of a beamed group
+    reaches the same height, but a notehead or beam joins it horizontally.
+    Staff lines are masked, and the search stays within half a staff space of
+    the staff, so rehearsal figures above and lyrics below cannot look like
+    attachments.
+    """
+    margin = max(2, int(round(0.5 * staff.space)))
+    top = max(0, int(round(staff.top)) - margin)
+    bottom = min(arr.shape[0] - 1, int(round(staff.bottom)) + margin)
+    span = max(1, int(round(2.5 * staff.space)))
+    lo = max(0, x0 - span)
+    hi = min(arr.shape[1], x1 + span + 1)
+    need = (x1 - x0 + 1) + max(4, int(round(0.25 * staff.space)))
+    masked = set()
+    thickness = max(1, int(round(staff.thickness))) + 2
+    for line in staff.lines:
+        y = int(round(line))
+        masked.update(range(y - thickness, y + thickness + 1))
+    # Printed lines are sometimes a little thicker than the measured value;
+    # any row that still spans most of the staff is a line as well.
+    x_left = max(0, int(round(staff.left)))
+    x_right = min(arr.shape[1] - 1, int(round(staff.right)))
+    if x_right > x_left:
+        counts = arr[top:bottom + 1, x_left:x_right + 1].sum(axis=1)
+        wide = np.flatnonzero(counts >= 0.6 * (x_right - x_left + 1))
+        masked.update(int(row) + top for row in wide)
+    for y in range(top, bottom + 1):
+        if y in masked:
+            continue
+        row = arr[y, lo:hi]
+        idx = np.flatnonzero(row)
+        if len(idx) < need:
+            continue
+        breaks = np.flatnonzero(np.diff(idx) > 1)
+        starts = np.r_[idx[0], idx[breaks + 1]]
+        ends = np.r_[idx[breaks], idx[-1]]
+        for a, b in zip(starts, ends):
+            start = int(a) + lo
+            stop = int(b) + lo
+            if (stop >= x0 - 2 and start <= x1 + 2
+                    and stop - start + 1 >= need):
+                return True
+    return False
+
+
 def find_barlines(arr: np.ndarray, staff: Staff, loose: bool = False,
-                  flush: bool = False) -> list[float]:
+                  flush: bool = False, flush_bottom: bool = False,
+                  reject_stems: bool = False) -> list[float]:
     """Column centres of full-height vertical strokes (barlines).
 
     Modern engravings extend barlines above/below the staff (strict test).
@@ -142,7 +191,14 @@ def find_barlines(arr: np.ndarray, staff: Staff, loose: bool = False,
         # Modern barlines extend below the bottom line; older ones may be
         # flush with it.  A one-pixel band-origin change after deskewing must
         # not turn every flush barline into a miss.
-        lower = bot_off - 1 if loose else (bot_off if flush else bot_off + 2)
+        if loose:
+            lower = bot_off - 1
+        elif flush:
+            lower = bot_off
+        elif flush_bottom:
+            lower = bot_off + 1
+        else:
+            lower = bot_off + 2
         upper_start = (top_off + max(2, int(round(0.6 * staff.space)))
                        if loose else top_off + 2)
         if starts[k] > upper_start or ends[k] < lower:
@@ -155,6 +211,7 @@ def find_barlines(arr: np.ndarray, staff: Staff, loose: bool = False,
         else:
             groups.append([x])
     barlines = []
+    rejected = []
     start = staff.left + 5.0 * staff.space   # skip the clef/key signature zone
     for group in groups:
         width = group[-1] - group[0] + 1
@@ -163,8 +220,18 @@ def find_barlines(arr: np.ndarray, staff: Staff, loose: bool = False,
             continue
         if centre < start:
             continue
+        if reject_stems and _attached_stroke(arr, staff, group[0], group[-1]):
+            rejected.append(centre)
+            continue
         barlines.append(centre)
-    return barlines
+    # A double bar/repeat is two strokes a few pixels apart; one of them may
+    # touch a note or beam.  Keep a rejected stroke when it belongs to such a
+    # pair, so the incipit/double-bar handling still sees both.
+    for centre in rejected:
+        if any(abs(centre - kept) <= 2.2 * staff.space
+               for kept in barlines):
+            barlines.append(centre)
+    return sorted(barlines)
 
 
 def find_grand_barlines(arr: np.ndarray, upper: Staff, lower: Staff,

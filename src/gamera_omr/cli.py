@@ -28,7 +28,9 @@ def _prepare(args):
     enabled = not args.no_deskew and source != "piano"
     return deskew.prepare_page(args.image, backend=args.backend,
                                enabled=enabled,
-                               flush_barlines=_flush_barlines(source))
+                               flush_barlines=_flush_barlines(source),
+                               flush_bottom_barlines=source == "nba",
+                               reject_stem_barlines=source == "nba")
 
 
 def _load_predictions(corpus: Path, args, source: str):
@@ -86,8 +88,8 @@ def _detect_piano_clefs(comps, staff, starts, initial):
             d for d in comps
             if (clef.cx + 0.2 * space <= d.cx <= clef.cx + 3.0 * space
                 and staff.top - 0.6 * space <= d.cy <= staff.bottom + 0.6 * space
-                and 6 <= d.area <= 140
-                and 2 <= d.w <= 0.45 * space and 2 <= d.h <= 0.75 * space
+                and 6 <= d.area <= 160
+                and 2 <= d.w <= 0.65 * space and 2 <= d.h <= 0.85 * space
                 and d.solidity >= 0.45)
         ]
         bass = any(
@@ -96,6 +98,12 @@ def _detect_piano_clefs(comps, staff, starts, initial):
             for i, a in enumerate(dots) for b in dots[i + 1:]
         )
         detected = "F4" if bass else "G2"
+        if not bass and x0 <= starts[0] + 0.5 * space:
+            # The opening clef follows the grand-staff convention.  Without
+            # the bass clef's two dots, a degraded print of F4 is
+            # indistinguishable from G2, and guessing treble there misreads
+            # the whole staff a sixth too high.
+            continue
         if detected != current:
             changes.append((clef.cx, detected))
             current = detected
@@ -219,7 +227,9 @@ def cmd_debug(args) -> int:
     for staff in staves:
         kept, dropped = segments.filter_components(comps, staff)
         kept_all.extend(kept)
-        barlines = segments.find_barlines(binary, staff)
+        barlines = segments.find_barlines(
+            binary, staff, flush_bottom=getattr(args, "source", None) == "nba",
+            reject_stems=getattr(args, "source", None) == "nba")
         barlines_by_staff[staff.index] = barlines
         bounds = staff.bounds or segments.measure_bounds(staff, barlines)
         print(f"staff {staff.index}: {len(kept)} components {dropped} "
@@ -355,7 +365,10 @@ def cmd_read(args) -> int:
         if staff.bounds:
             bounds = staff.bounds
         else:
-            barlines = segments.find_barlines(arr, staff, flush=_flush_barlines(args.source))
+            barlines = segments.find_barlines(
+                arr, staff, flush=_flush_barlines(args.source),
+                flush_bottom=args.source == "nba",
+                reject_stems=args.source == "nba")
             bounds = segments.measure_bounds(staff, barlines)
         bounds_all.extend(bounds)
         if x_rhythm and args.tacet_bars:
@@ -439,7 +452,10 @@ def cmd_report(args) -> int:
         for staff in staves:
             _kept, dropped = segments.filter_components(all_comps, staff)
             drops[str(staff.index)] = dropped
-            bars = segments.find_barlines(arr, staff, flush=_flush_barlines(args.source))
+            bars = segments.find_barlines(
+                arr, staff, flush=_flush_barlines(args.source),
+                flush_bottom=args.source == "nba",
+                reject_stems=args.source == "nba")
             if staff.bounds:
                 bounds = staff.bounds
             else:
@@ -546,6 +562,7 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("debug", help="write staff/removal/segmentation overlays")
     p.add_argument("--image", required=True, help="stack PNG")
+    p.add_argument("--source", help="score source (selects barline handling)")
     p.add_argument("--out", help="output directory (default: next to the image)")
     p.add_argument("--backend", default="auto", choices=["auto", "projections", "miyao"])
     p.add_argument("--no-deskew", action="store_true",

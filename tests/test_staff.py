@@ -8,7 +8,7 @@ import pytest
 from gamera_omr import config
 from gamera_omr.segments import find_barlines, measure_bounds
 from gamera_omr.stacks import load_stack
-from gamera_omr.staffs import find_staves, remove_staff_lines, validate_staves
+from gamera_omr.staffs import Staff, find_staves, remove_staff_lines, validate_staves
 
 CHORALE = config.WORK / "mvt" / "5" / "stacks" / "nba" / "S-01.png"
 CHORUS = config.WORK / "stacks" / "nba" / "S-01.png"
@@ -77,3 +77,33 @@ def test_staff_finding_six_systems():
     staves, diag = find_staves(page)
     assert len(staves) == 6
     assert diag["oracle_mae"] is None or diag["oracle_mae"] < 3.0
+
+
+def _barline_page(barline_end: int):
+    """Five-line staff with one barline, a long stem and a beamed stem."""
+    lines = [40, 60, 80, 100, 120]
+    staff = Staff(0, lines, left=20, right=540, space=20.0, thickness=2.0)
+    arr = np.zeros((150, 560), np.uint8)
+    for y in lines:
+        arr[y:y + 2, 20:540] = 1
+    arr[38:barline_end, 300:303] = 1          # real barline
+    arr[38:122, 420:422] = 1                  # long beamed stem
+    arr[38:42, 420:450] = 1                   # beam at its top
+    arr[112:122, 412:422] = 1                 # notehead at its bottom
+    return staff, arr
+
+
+def test_beamed_stem_is_not_a_barline():
+    staff, arr = _barline_page(123)
+    bars = find_barlines(arr, staff, flush_bottom=True, reject_stems=True)
+    assert any(abs(b - 301) <= 1.5 for b in bars)
+    assert not any(abs(b - 421) <= 1.5 for b in bars)
+
+
+def test_flush_bottom_barline_option():
+    # A barline ending one pixel below the bottom line is accepted only when
+    # the page is read with the option used for the NBA continuo.
+    staff, arr = _barline_page(122)
+    assert not any(abs(b - 301) <= 1.5 for b in find_barlines(arr, staff))
+    bars = find_barlines(arr, staff, flush_bottom=True)
+    assert any(abs(b - 301) <= 1.5 for b in bars)

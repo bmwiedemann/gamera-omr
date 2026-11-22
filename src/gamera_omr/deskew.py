@@ -44,6 +44,8 @@ class DeskewOptions:
     keep_original_on_regression: bool = True
     max_passes: int = 2
     flush_barlines: bool = False  # older prints draw barlines flush
+    flush_bottom_barlines: bool = False  # barlines end on the bottom line
+    reject_stem_barlines: bool = False  # long beamed stems look like barlines
 
 
 @dataclass
@@ -744,7 +746,9 @@ def deskew_page(
     if initial_staves:
         pre = _summary(initial_staves, initial_diag)
         pre_bounds = {staff.index: measure_bounds(
-            staff, find_barlines(arr, staff, flush=options.flush_barlines))
+            staff, find_barlines(arr, staff, flush=options.flush_barlines,
+                              flush_bottom=options.flush_bottom_barlines,
+                              reject_stems=options.reject_stem_barlines))
             for staff in initial_staves}
         bands = find_system_bands(arr, staves=initial_staves, options=options)
         if len(bands) != len(initial_staves):
@@ -797,7 +801,9 @@ def deskew_page(
         corrected_arr = candidate.array()
         post_bounds = [measure_bounds(
             staff, find_barlines(corrected_arr, staff,
-                                 flush=options.flush_barlines))
+                                 flush=options.flush_barlines,
+                                 flush_bottom=options.flush_bottom_barlines,
+                                 reject_stems=options.reject_stem_barlines))
             for staff in corrected]
         pre_list = [pre_bounds.get(staff.index, []) for staff in corrected]
 
@@ -917,12 +923,18 @@ def prepare_page(
     enabled: bool = True,
     options: DeskewOptions = DeskewOptions(),
     flush_barlines: bool = False,
+    flush_bottom_barlines: bool = False,
+    reject_stem_barlines: bool = False,
 ) -> tuple[StackPage, list[Staff], dict]:
     """Load, deskew and staff-find a page; return merged diagnostics."""
     page = (load_stack(page_or_path)
             if isinstance(page_or_path, (str, Path)) else page_or_path)
     if flush_barlines and not options.flush_barlines:
         options = replace(options, flush_barlines=True)
+    if flush_bottom_barlines and not options.flush_bottom_barlines:
+        options = replace(options, flush_bottom_barlines=True)
+    if reject_stem_barlines and not options.reject_stem_barlines:
+        options = replace(options, reject_stem_barlines=True)
     if not enabled:
         staves, diag = find_staves(page, backend)
         diag["deskew"] = {

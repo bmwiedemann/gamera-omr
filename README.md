@@ -155,8 +155,10 @@ read with `--source piano`:
   printed 32nd-note runs distinct instead of collapsing them into one chord.
 - **Clef changes are followed and written.**  At each measure start the engine
   looks for a clef-sized glyph; a bass clef is recognised by its two dots,
-  otherwise the clef is treble.  Pitches after the change use the new clef,
-  and the change is emitted as the staff's clef in the MusicXML
+  otherwise the clef is treble.  The opening clef follows the grand-staff
+  convention unless a bass clef is positively recognised, so a degraded F4
+  (dots lost in the scan) is not read as G2.  Pitches after a change use the
+  new clef, and the change is emitted as the staff's clef in the MusicXML
   (p-001-s0 changes the lower staff from F4 to G2 before its last measure).
 
 Current status: `p-001-s0` now has the correct 5 measures (the grand-staff
@@ -214,6 +216,13 @@ on the 1900s prints.
 - The event band excludes text above the staff (instrument names) and a tall/narrow
   clef zone at each system start; the old prints otherwise turn those into phantom
   notes.
+- **Barlines vs. long stems (NBA).**  NBA continuo pages draw barlines flush with
+  the bottom line, while the stems of beamed eighths can span the whole staff.
+  For `source=nba`, a stroke ending on the bottom line is accepted, and a
+  full-height stroke that a notehead or beam joins horizontally is rejected as a
+  stem; a rejected stroke belonging to a double bar stays with its partner.  The
+  movement 8 continuo now reads 6–7 measures per system instead of 15–17.  Other
+  sources keep the previous barline rules.
 - Older prints use a class-primary quarter/half decision (`legacy=True`), because their
   open noteheads often have an inked counter; modern NBA prints use the ink-ratio rule.
 
