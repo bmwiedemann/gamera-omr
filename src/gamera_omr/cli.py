@@ -28,6 +28,26 @@ def _prepare(args):
                                flush_barlines=_flush_barlines(source))
 
 
+def _load_predictions(corpus: Path, args, source: str):
+    """Classify a corpus, with a low-confidence BGA fallback model.
+
+    The raw-trained BGA model handles the dense chorale pages best, but the
+    deskewed-page model is much better on the rest-heavy pages where the old
+    model's confidence collapses (e.g. the soprano's late entrance).
+    """
+    model_path = Path(args.model) if args.model else default_model(source)
+    predictions = classify.predict(classify.load_model(model_path), corpus)
+    if not args.model and source.startswith("bga"):
+        scores = [p["confidence"] for p in predictions.values()]
+        if scores and sum(scores) / len(scores) < 0.85:
+            alternative = Path("models/bga/model-deskew.xml")
+            if alternative.exists():
+                model_path = alternative
+                predictions = classify.predict(
+                    classify.load_model(alternative), corpus)
+    return predictions, model_path
+
+
 def _gamera_version() -> str:
     try:
         import gamera  # noqa: PLC0415
@@ -156,14 +176,14 @@ def cmd_read(args) -> int:
     with tempfile.TemporaryDirectory() as td:
         corpus = Path(td)
         glyphs.save_corpus(items, corpus)
-        model = classify.load_model(args.model and Path(args.model) or default_model(args.source))
-        predictions = classify.predict(model, corpus)
+        predictions, _model_path = _load_predictions(corpus, args, args.source)
 
     clef = config.clef(args.source, args.voice)
     fifths = config.key_fifths(args.movement) or 0
     time_signature = config.time_signature(args.movement)
     arr = page.array()
-    x_rhythm = args.source in ("rosler", "sibley")
+    forced_x = args.source in ("rosler", "sibley")
+    x_rhythm = forced_x
     cleaned = remove_staff_lines(page, staves, repair=repair)
     all_comps = segments.components(cleaned.image)
     dots = []
@@ -195,16 +215,21 @@ def cmd_read(args) -> int:
                         tacet.add(offset + i)
         staff_events = decode.decode_staff(staff, items, predictions, bounds,
                                            clef, fifths, dots=dots, legacy=legacy,
-                                           bar_length=bar, require_head=x_rhythm)
+                                           bar_length=bar, require_head=x_rhythm,
+                                           recover_edges=args.source.startswith("bga"))
         for event in staff_events:
             event.measure += offset
         events.extend(staff_events)
         offset += len(bounds)
 
     events = decode.normalize_measures(events, offset, bar, tacet=tacet)
-    if x_rhythm:
+    note_measures = len({e.measure for e in events if e.kind == "note"})
+    auto_x = (args.source.startswith("bga")
+              and note_measures < 0.5 * max(offset, 1))
+    if forced_x or auto_x:
         events = decode.assign_onsets_from_x(
-            events, bounds_all, bar, anchor=(args.source == "rosler"))
+            events, bounds_all, bar,
+            anchor=args.source in ("rosler", "bga", "bga2"))
     else:
         decode.fit_durations(events, offset, bar)
         events = decode.assign_onsets(events, offset, bar)
@@ -232,8 +257,7 @@ def cmd_report(args) -> int:
     with tempfile.TemporaryDirectory() as td:
         corpus = Path(td)
         glyphs.save_corpus(items, corpus)
-        model = classify.load_model(Path(args.model) if args.model else default_model(args.source))
-        predictions = classify.predict(model, corpus)
+        predictions, model_path = _load_predictions(corpus, args, args.source)
 
     arr = page.array()
     cleaned = remove_staff_lines(page, staves, repair=repair)
@@ -242,7 +266,8 @@ def cmd_report(args) -> int:
     fifths = config.key_fifths(args.movement) or 0
     time_signature = config.time_signature(args.movement)
     bar = Fraction(meter.TimeSignature(time_signature).barDuration.quarterLength)
-    x_rhythm = args.source in ("rosler", "sibley")
+    forced_x = args.source in ("rosler", "sibley")
+    x_rhythm = forced_x
 
     events: list = []
     drops, barlines, measures = {}, {}, {}
@@ -269,16 +294,21 @@ def cmd_report(args) -> int:
         staff_events = decode.decode_staff(staff, items, predictions, bounds,
                                            clef, fifths, dots=[],
                                            legacy=legacy, bar_length=bar,
-                                           require_head=x_rhythm)
+                                           require_head=x_rhythm,
+                                           recover_edges=args.source.startswith("bga"))
         for event in staff_events:
             event.measure += offset
         events.extend(staff_events)
         offset += len(bounds)
 
     events = decode.normalize_measures(events, offset, bar, tacet=tacet)
-    if x_rhythm:
+    note_measures = len({e.measure for e in events if e.kind == "note"})
+    auto_x = (args.source.startswith("bga")
+              and note_measures < 0.5 * max(offset, 1))
+    if forced_x or auto_x:
         events = decode.assign_onsets_from_x(
-            events, bounds_all, bar, anchor=(args.source == "rosler"))
+            events, bounds_all, bar,
+            anchor=args.source in ("rosler", "bga", "bga2"))
     else:
         decode.fit_durations(events, offset, bar)
         events = decode.assign_onsets(events, offset, bar)
@@ -319,7 +349,7 @@ def cmd_report(args) -> int:
     report = {
         "image": str(page.path), "source": args.source, "voice": args.voice,
         "movement": args.movement,
-        "model": str(Path(args.model) if args.model else default_model(args.source)),
+        "model": str(model_path),
         "staff": {"backend": diag.get("backend"), "count": len(staves),
                   "spaces": [round(s.space, 1) for s in staves],
                   "oracle_mae": diag.get("oracle_mae"),
