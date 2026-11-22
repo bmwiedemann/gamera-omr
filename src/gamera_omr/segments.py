@@ -204,8 +204,25 @@ def _attachment_score(arr: np.ndarray, staff: Staff, x0: int, x1: int) -> int:
         counts = arr[top:bottom + 1, x_left:x_right + 1].sum(axis=1)
         wide = np.flatnonzero(counts >= 0.6 * (x_right - x_left + 1))
         masked.update(int(row) + top for row in wide)
+    # Only ink touching the stroke itself counts: a tie or slur passing
+    # just below a barline is not attached to it, while a beam or head is
+    # joined to its stem within the stem's own extent.
+    xc = (x0 + x1) // 2
+    stroke_top, stroke_bottom = top, bottom
+    if 0 <= xc < arr.shape[1]:
+        column = arr[top:bottom + 1, max(0, x0):x1 + 1].any(axis=1)
+        idx = np.flatnonzero(column)
+        if len(idx):
+            breaks = np.flatnonzero(np.diff(idx) > 1)
+            starts = np.r_[idx[0], idx[breaks + 1]]
+            ends = np.r_[idx[breaks], idx[-1]]
+            k = int(np.argmax(ends - starts))
+            # a head is centred on its stem's end
+            reach = max(2, int(round(0.6 * staff.space)))
+            stroke_top = top + int(starts[k]) - reach
+            stroke_bottom = top + int(ends[k]) + reach
     joined = 0
-    for y in range(top, bottom + 1):
+    for y in range(max(top, stroke_top), min(bottom, stroke_bottom) + 1):
         if y in masked:
             continue
         row = arr[y, lo:hi]

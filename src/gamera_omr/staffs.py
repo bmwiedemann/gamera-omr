@@ -126,8 +126,12 @@ def validate_staves(staves: list[Staff], image) -> tuple[bool, list[str]]:
         if staff.right - staff.left < 0.55 * width:
             reasons.append(f"staff {staff.index}: x coverage {staff.right - staff.left:.0f}")
     for i in range(len(staves) - 1):
+        # Centre distance of two separate staves: one staff height plus the
+        # gap between them.  Small recitative grand staves in vocal scores
+        # leave only ~2.5 spaces between the staves (~1.6 heights centre to
+        # centre); anything closer is a split or duplicated staff.
         gap = staves[i + 1].center - staves[i].center
-        if gap < 1.8 * max(staves[i].height, staves[i + 1].height):
+        if gap < 1.45 * max(staves[i].height, staves[i + 1].height):
             reasons.append(f"staves {i}/{i + 1} too close ({gap:.0f}px)")
     return not reasons, reasons
 

@@ -196,7 +196,12 @@ def head_template(ink: np.ndarray, space: float):
     return tpl
 
 
-def make_templates(glyphs, predictions, limit: int = 12):
+def make_templates(glyphs, predictions, limit: int = 12, oval: bool = False):
+    """Notehead templates from the page's glyphs classified as notes.
+
+    `oval` keeps only oval templates (light corners); the stem-first reader
+    uses it, the voice-stack readers rely on their looser templates.
+    """
     templates, seen = [], set()
     for g in glyphs:
         label = predictions.get(g.uid, {}).get("label")
@@ -211,9 +216,20 @@ def make_templates(glyphs, predictions, limit: int = 12):
             continue
         # A notehead is about one staff space in both directions; a rest,
         # accidental or clef leaf makes a very different template.
+        if oval:
+            rows = np.flatnonzero(tpl.any(axis=1))
+            tpl = tpl[rows[0]:rows[-1] + 1]
         h, w = tpl.shape
         if not (0.4 * g.space <= w <= 1.8 * g.space
                 and 0.4 * g.space <= h <= 1.6 * g.space):
+            continue
+        # A head is a (tilted) oval: the corners of at least one diagonal
+        # are light.  A block cut from a beam matches every beam and stem
+        # junction.
+        ch, cw = max(1, h // 4), max(1, w // 4)
+        diagonals = ((tpl[:ch, :cw].mean() + tpl[-ch:, -cw:].mean()) / 2,
+                     (tpl[:ch, -cw:].mean() + tpl[-ch:, :cw].mean()) / 2)
+        if oval and min(diagonals) > 0.4:
             continue
         key = (tpl.shape, int(tpl.sum()))
         if key in seen:
@@ -621,9 +637,14 @@ def stemmed_heads(ink: np.ndarray, space: float, templates=None):
             return max(_head_likeness(ink, space, x, y, templates)
                        for x, y, _f in group)
 
+        # A chord spanning an octave or more puts heads past the stem's
+        # middle; they stay in the chord unless they sit near the free end,
+        # where flags and beams are.
         if end_score(at_top) >= end_score(at_bottom):
+            at_top += [hd for hd in at_bottom if bottom - hd[1] >= 2.2 * space]
             at_bottom = []
         else:
+            at_bottom += [hd for hd in at_top if hd[1] - top >= 2.2 * space]
             at_top = []
     heads = at_top or at_bottom
     # Heads hang left of an up-stem and right of a down-stem; a blob on the
@@ -719,7 +740,9 @@ def _column_runs(column: np.ndarray):
 def _two_strokes(ink: np.ndarray, space: float) -> bool:
     """Two parallel vertical strokes about half a space apart (# or natural)."""
     h, w = ink.shape
-    if w > 1.6 * space:
+    # A sharp or natural is about three spaces tall; a stem with a flag
+    # hugging it is two strokes too, but taller.
+    if w > 1.6 * space or h > 3.7 * space:
         return False
     # Ink coverage per column, tolerant of small breaks in the strokes.
     cover = ink.astype(bool).sum(axis=0)
@@ -778,14 +801,18 @@ def accidental_kind(ink: np.ndarray, space: float) -> str | None:
         if 0.55 * space <= w < 0.95 * space:
             return "natural"
         return None
-    if not (0.5 * space <= w <= 1.05 * space and h <= 2.9 * space):
+    if not (0.5 * space <= w <= 1.15 * space and h <= 3.2 * space):
         return None
     stem = _longest_vertical(ink)
     if stem is None or stem[2] - stem[1] + 1 < 1.5 * space:
         return None
     if stem[0] > 0.4 * w or stem[2] < h - 0.25 * space:
         return None
-    contours, hierarchy = cv2.findContours(_u8(ink), cv2.RETR_CCOMP,
+    # A pixel-wide gap in the bowl (worn print, line removal) still leaves
+    # a flat; close it before looking for the bowl's counter.
+    closed = cv2.morphologyEx(_u8(ink), cv2.MORPH_CLOSE,
+                              np.ones((3, 3), np.uint8))
+    contours, hierarchy = cv2.findContours(closed, cv2.RETR_CCOMP,
                                            cv2.CHAIN_APPROX_SIMPLE)
     if hierarchy is None:
         return None
@@ -795,6 +822,15 @@ def accidental_kind(ink: np.ndarray, space: float) -> str | None:
         _x, y, _w, ch = cv2.boundingRect(contour)
         if y + ch / 2.0 >= 0.5 * h:
             return "flat"
+    # Line removal can cut the top of the bowl open: the ink right of the
+    # stroke is then a lobe in the lower half reaching the foot.
+    right = ink[:, min(w, int(stem[0]) + max(3, int(0.3 * space))):]
+    rows = np.flatnonzero(right.any(axis=1))
+    cols = np.flatnonzero(right.any(axis=0))
+    if (len(rows) and rows[0] >= 0.4 * h and rows[-1] >= h - 0.6 * space
+            and cols[-1] - cols[0] + 1 >= 0.35 * space
+            and rows[-1] - rows[0] + 1 >= 0.5 * space):
+        return "flat"
     return None
 
 
@@ -833,3 +869,250 @@ def lone_head(ink: np.ndarray, space: float):
     if len(extra_cols) and extra_cols[-1] - extra_cols[0] + 1 > 0.35 * space:
         return None
     return float(x), float(y)
+
+
+def eighth_rest(ink: np.ndarray, space: float) -> bool:
+    """True for an eighth rest: a round blob at the top left with a thin
+    stroke running from the top right down and to the left.
+
+    The glyph models often call it text or a slur.  A flag has a stem much
+    longer than two spaces, a lone head has its blob at the bottom, and a
+    flat's bowl hangs at the foot of its stroke.
+    """
+    h, w = ink.shape
+    if not (1.4 * space <= h <= 2.4 * space and 0.7 * space <= w <= 1.5 * space):
+        return False
+    u8 = _u8(ink)
+    contours, hierarchy = cv2.findContours(u8, cv2.RETR_CCOMP,
+                                           cv2.CHAIN_APPROX_SIMPLE)
+    if hierarchy is not None and any(hh[3] != -1 and cv2.contourArea(c) > 0.04 * space * space
+                                     for c, hh in zip(contours, hierarchy[0])):
+        return False
+    dt = cv2.distanceTransform(u8, cv2.DIST_L2, 3)
+    by, bx = np.unravel_index(int(np.argmax(dt)), dt.shape)
+    # The rest's blob is about half a space across; a notehead is wider.
+    if (not 0.17 * space <= dt[by, bx] <= 0.4 * space
+            or by > 0.45 * h or bx > 0.6 * w):
+        return False
+    # Below the blob only a thin slanting stroke remains.
+    lower = ink[int(0.55 * h):]
+    widths = [np.flatnonzero(r) for r in lower]
+    rows = [r for r in widths if len(r)]
+    if len(rows) < 0.8 * len(widths):
+        return False
+    if max(r[-1] - r[0] + 1 for r in rows) > 0.45 * space:
+        return False
+    # The stroke starts at the right of the blob and ends further left.
+    top_right = max(int(np.flatnonzero(r)[-1]) for r in ink[:int(0.45 * h)] if r.any())
+    bottom = rows[-1]
+    return (top_right >= 0.7 * w - 1
+            and (bottom[0] + bottom[-1]) / 2.0 <= top_right - 0.25 * space)
+
+
+def _vertical_reach(binary: np.ndarray, x0: int, x1: int, y: int,
+                    step: int) -> int:
+    """Longest ink run among columns x0..x1 starting at row y going `step`."""
+    h, w = binary.shape
+    best = 0
+    for x in range(max(0, x0), min(w, x1 + 1)):
+        yy, n = y, 0
+        while 0 <= yy < h and binary[yy, x]:
+            n += 1
+            yy += step
+        best = max(best, n)
+    return best
+
+
+def open_heads(binary: np.ndarray, staff: Staff,
+               barlines: list[float] | None = None):
+    """Half and whole noteheads found by their counters.
+
+    The glyph models barely know open heads, and staff-line removal cuts a
+    whole note in a space into two crescents.  On the page before line
+    removal an open head is a closed white counter, about half to one space
+    wide and under a space tall, inside a ring of ink; a line through the
+    head splits the counter into two halves, which are joined again.  A
+    stem is a vertical stroke of at least 2.5 spaces leaving the ring at
+    the right going up or at the left going down.
+
+    Returns [(x, y, duration, direction, sure)] in page coordinates; `sure`
+    marks counters that are heads even where no glyph reader found one.
+    """
+    space = staff.space
+    thick = max(1, int(round(staff.thickness)))
+    h, w = binary.shape
+    y0 = int(max(0, staff.top - 3.5 * space))
+    y1 = int(min(h, staff.bottom + 3.5 * space))
+    x0 = int(max(0, staff.left))
+    x1 = int(min(w, staff.right))
+    if y1 - y0 < 4 or x1 - x0 < 4:
+        return []
+    sub = binary[y0:y1, x0:x1] > 0
+    n, labels, stats, _cent = cv2.connectedComponentsWithStats(
+        _u8(~sub), connectivity=4)
+    sh, sw = sub.shape
+    holes = []
+    for i in range(1, n):
+        x, y, bw, bh, area = (int(v) for v in stats[i])
+        if x == 0 or y == 0 or x + bw >= sw or y + bh >= sh:
+            continue
+        if not (0.15 * space <= bw <= 1.3 * space and bh <= 0.95 * space
+                and area >= 3):
+            continue
+        holes.append([x, y, bw, bh, area, [i]])
+    # Join the halves of a counter split by a staff or ledger line.
+    holes.sort(key=lambda b: b[1])
+    used = set()
+    merged = []
+    for i, a in enumerate(holes):
+        if i in used:
+            continue
+        box = list(a)
+        for j in range(i + 1, len(holes)):
+            if j in used:
+                continue
+            b = holes[j]
+            gap = b[1] - (box[1] + box[3])
+            if gap > thick + 2:
+                if b[1] > box[1] + box[3] + thick + 2:
+                    break
+                continue
+            lo = max(box[0], b[0])
+            hi = min(box[0] + box[2], b[0] + b[2])
+            if gap < 1 or hi - lo < -1:
+                continue
+            # The rows between must be a horizontal stroke across the head.
+            between = sub[box[1] + box[3]:b[1], max(lo - 1, 0):hi + 1]
+            if between.size == 0 or between.mean() < 0.9:
+                continue
+            nx = min(box[0], b[0])
+            nx1 = max(box[0] + box[2], b[0] + b[2])
+            box = [nx, box[1], nx1 - nx, b[1] + b[3] - box[1],
+                   box[4] + b[4], box[5] + b[5]]
+            used.add(j)
+            break
+        merged.append(box)
+    out = []
+    bars = [b - x0 for b in (barlines or [])]
+    for x, y, bw, bh, area, ids in merged:
+        if not (0.4 * space <= bw <= 1.3 * space
+                and 0.25 * space <= bh <= 0.95 * space):
+            continue
+        if area < 0.08 * space * space:
+            continue
+        mask = np.isin(labels[y:y + bh, x:x + bw], ids)
+        # A counter is rounded: its first and last rows are short.  The
+        # space between two staff lines, a barline and a head is a
+        # rectangle with flat top and bottom.
+        if (mask[0].sum() + mask[-1].sum()) / 2.0 > 0.7 * bw:
+            continue
+        # A thin ring of ink surrounds the counter.
+        r = max(1, int(round(0.12 * space)))
+        pad = r + 1
+        ya, yb = max(0, y - pad), min(sh, y + bh + pad)
+        xa, xb = max(0, x - pad), min(sw, x + bw + pad)
+        full = np.zeros((yb - ya, xb - xa), np.uint8)
+        full[y - ya:y - ya + bh, x - xa:x - xa + bw] = mask
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                           (2 * r + 1, 2 * r + 1))
+        ring = (cv2.dilate(full, kernel) > 0) & (full == 0)
+        if sub[ya:yb, xa:xb][ring].mean() < 0.85:
+            continue
+        # The side walls of a head are thicker than a stem or the strokes
+        # of a sharp, and the head as a whole is head-sized.
+        cy_local = y + bh // 2
+        rows = [rr for rr in range(y, y + bh) if mask[rr - y].any()]
+        lefts, rights = [], []
+        for rr in rows:
+            cols = np.flatnonzero(mask[rr - y])
+            left = x + int(cols[0])
+            right = x + int(cols[-1])
+            ln = 0
+            while left - 1 - ln >= 0 and sub[rr, left - 1 - ln]:
+                ln += 1
+            rn = 0
+            while right + 1 + rn < sw and sub[rr, right + 1 + rn]:
+                rn += 1
+            lefts.append(ln)
+            rights.append(rn)
+        wall_l = float(np.median(lefts))
+        wall_r = float(np.median(rights))
+        outer = bw + wall_l + wall_r
+        if not (0.9 * space <= outer <= 2.4 * space):
+            continue
+        # Walls thicker than a head's ring are filled heads or accidentals
+        # next to a gap; a counter filling its box is the rectangle between
+        # two lines and two stems.
+        if min(wall_l, wall_r) < 2 or max(wall_l, wall_r) > 0.85 * space:
+            continue
+        if area > 0.85 * bw * bh:
+            continue
+        # The ring is thin above and below the counter too (with a staff
+        # line at most); a filled head above it is a flag curling back to
+        # its stem below the head.
+        mid = x + bw // 2
+        cols = [c for c in range(mid - 1, mid + 2) if 0 <= c < sw]
+        top_ring = min(_vertical_reach(sub, c, c, y - 1, -1) for c in cols)
+        bottom_ring = min(_vertical_reach(sub, c, c, y + bh, 1) for c in cols)
+        if max(top_ring, bottom_ring) > 0.55 * space:
+            continue
+        # The side walls belong to the ring, not to stems running past the
+        # counter above and below (holes between stems, a beam and a line);
+        # a half note's stem leaves the ring on one side only.
+        def side_extent(col):
+            col = int(min(max(col, 0), sw - 1))
+            a = b = cy_local
+            if not sub[cy_local, col]:
+                return cy_local, cy_local - 1
+            while a - 1 >= 0 and sub[a - 1, col]:
+                a -= 1
+            while b + 1 < sh and sub[b + 1, col]:
+                b += 1
+            return a, b
+
+        left_col = x - 1 - max(0, int(wall_l) // 2)
+        right_col = x + bw + max(0, int(wall_r) // 2)
+        ext_l, ext_r = side_extent(left_col), side_extent(right_col)
+        runs = sorted((ext_l[1] - ext_l[0] + 1, ext_r[1] - ext_r[0] + 1))
+        if runs[0] > 1.5 * space:
+            continue
+        cx = x + bw / 2.0
+        # Next to a barline, the barline would pass for a stem.
+        near_bar = any(abs(cx - b) <= 1.2 * space for b in bars)
+        half_outer = outer / 2.0
+        stem_len = 2.2 * space
+        up = _vertical_reach(sub, int(cx + 0.2 * space),
+                             int(cx + half_outer + 2), cy_local, -1)
+        down = _vertical_reach(sub, int(cx - half_outer - 2),
+                               int(cx - 0.2 * space), cy_local, 1)
+        direction = None
+        if not near_bar:
+            if up >= stem_len and up >= down:
+                direction = "up"
+            elif down >= stem_len:
+                direction = "down"
+        stemmed = direction is not None or (near_bar
+                                            and max(up, down) >= stem_len)
+        duration = Fraction(2) if stemmed else Fraction(4)
+        # Confidence that this is a head on its own, without a glyph reader
+        # finding a head at the same spot: a whole note is a symmetric ring
+        # around a well-filled oval; a half note has its stem.  Holes left
+        # between a filled head, a stem and a line or tie are lopsided.
+        walls = max(wall_l, wall_r) / max(1.0, min(wall_l, wall_r))
+        fill = area / float(bw * bh)
+        if direction is None:
+            sure = (walls <= 1.8 and fill >= 0.5 and outer >= 1.4 * space
+                    and bw >= 0.6 * space and runs[1] <= 1.5 * space)
+        else:
+            # A stem leaves the head on one end only; a stroke running past
+            # the counter on both ends is the stem of a note whose flag
+            # curls back to it.
+            ext = ext_r if direction == "up" else ext_l
+            beyond = (y + bh - 1 - ext[1]) if direction == "up" else (ext[0] - y)
+            sure = (walls <= 2.5 and fill >= 0.35 and outer >= 1.2 * space
+                    and -beyond <= 0.6 * space)
+        # Next to a barline the hole is often closed by the barline itself.
+        sure = sure and not near_bar
+        out.append((x0 + cx, y0 + y + bh / 2.0, duration, direction, sure))
+    return out
+

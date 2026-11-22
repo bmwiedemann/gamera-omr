@@ -160,7 +160,8 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
     from . import notes as notes_module  # local import avoids a cycle
 
     if templates is None:
-        templates = notes_module.make_templates(glyphs, predictions)
+        templates = notes_module.make_templates(glyphs, predictions,
+                                                oval=stem_heads)
     events = []
 
     def clef_at(x: float) -> str:
@@ -202,6 +203,15 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
                 continue
             signature_limit = x if signature_limit is None else min(
                 signature_limit, x)
+    signature_end = (_signature_end(staff, glyphs, time_signature,
+                                    notes_module) if stem_heads else None)
+    if stem_heads and signature_limit is not None:
+        # The page's head templates miss some heads (on ledger lines, with
+        # a flag), and every note before the first matching one would be
+        # dropped as part of the signature.  The clef, key and time
+        # signature are a run of closely spaced glyphs from the staff start;
+        # the first glyph after a gap that is no accidental ends it.
+        signature_limit = min(signature_limit, signature_end)
 
     def measure_of(x: float) -> int | None:
         if not bounds:
@@ -249,6 +259,17 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
             if g.h < 0.6 * g.space:
                 continue
             wide_note = g.w > 2.5 * g.space
+        if (stem_heads and label != "rest.8"
+                and g.x0 >= signature_end
+                and staff.top - 0.5 * staff.space <= g.cy
+                <= staff.bottom + 0.5 * staff.space
+                and notes_module.eighth_rest(g.ink, g.space)):
+            # The glyph models often call an eighth rest text or a slur.
+            measure = measure_of(g.cx)
+            if measure is not None:
+                events.append(Event(measure, g.cx, None, Fraction(1, 2),
+                                    "rest", g, hy=g.cy))
+            continue
         if stem_heads and label in ("text", "skip", "slur") or (
                 stem_heads and label.startswith("rest.")):
             # A head whose stem broke off (thin stems in old prints) is a
@@ -266,6 +287,8 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
                                       g, flexible=True, hy=head_y))
                 continue
         if label.startswith("rest."):
+            if stem_heads and g.x0 < signature_end:
+                continue  # a piece of the clef or a common-time C
             duration = (bar_length if label == "rest.measure"
                         else REST_DURATIONS.get(label))
             if duration is None:
@@ -275,7 +298,12 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
                 events.append(Event(measure, g.cx, None, duration, "rest", g,
                                     hy=g.y0 + g.h / 2))
             continue
-        if label == "beam.group" or wide_note:
+        # A single stemmed note or chord called a beamed group is read from
+        # its stem: the group splitter would count its flag or stem end as
+        # a beam and halve the duration.
+        single_stem = (stem_heads and label == "beam.group"
+                       and g.w <= 1.8 * g.space and g.h >= 2.2 * g.space)
+        if (label == "beam.group" and not single_stem) or wide_note:
             heads = notes_module.split_beam_group(
                 g.ink, g.space, templates,
                 use_rowrun=beam_row_heads and not wide_note)
@@ -300,12 +328,17 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
         duration = duration_for(label, g.ink, g.space, legacy=legacy)
         # A flagged note past the system start is often called a clef,
         # slur or text by the glyph models.
-        stemmed_label = (label in ("note.black", "note.open")
+        stemmed_label = (label in ("note.black", "note.open") or single_stem
                          or (label in ("text", "slur", "skip", "clef")
                              and g.h >= 2.2 * g.space
-                             and 0.6 * g.space <= g.w <= 2.6 * g.space))
-        if label == "clef" and _clef_dots(g, glyphs, staff):
-            continue  # a real bass clef
+                             # a ledger line widens a note on it
+                             and 0.6 * g.space <= g.w
+                             <= (3.0 if stem_heads else 2.6) * g.space))
+        if label == "clef" and _clef_dots(g, glyphs, staff) and not (
+                stem_heads and signature_limit is not None
+                and g.x0 > signature_limit
+                and notes_module.stemmed_heads(g.ink, g.space, templates)[0]):
+            continue  # a real bass clef, not a note with a staccato dot
         if stem_heads and stemmed_label:
             # Find the stem first, then the heads at its end.  This keeps a
             # flag out of the head position, reads every head of a chord,
@@ -320,7 +353,10 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
                 continue
             if heads:
                 for hx, hy, head_duration in heads:
-                    if duration is not None and duration >= 2:
+                    if (duration is not None and duration >= 2
+                            and head_duration >= 1):
+                        # an open head the stem reader took for a filled
+                        # one; a flagged or beamed note is never open
                         head_duration = duration
                     head_y = g.y0 + hy
                     x = g.x0 + hx
@@ -336,7 +372,9 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
             # A large piano figure of stacked chords and beams can be one
             # connected component and get classified as text.  It still
             # contains noteheads, so split it like a beamed group.
-            if (voices and label in ("text", "skip")
+            # A beamed group joined to its slur is often called a slur.
+            if (((voices and label in ("text", "skip"))
+                 or (stem_heads and label in ("text", "skip", "slur")))
                     and g.w >= 2.0 * g.space and g.h >= 2.5 * g.space):
                 heads = notes_module.split_beam_group(
                     g.ink, g.space, templates, use_rowrun=beam_row_heads)
@@ -376,7 +414,9 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
             # barline is also text and is only a few pixels wide, so require a
             # head-sized horizontal extent before recovering a note.
             if (label in ("slur", "text") and g.h >= 2.2 * g.space
-                    and 0.6 * g.space <= g.w <= 1.6 * g.space):
+                    and 0.6 * g.space <= g.w <= 1.6 * g.space
+                    and not (stem_heads and notes_module.accidental_kind(
+                        g.ink, g.space))):
                 fill, cy, h, w = head_fill(g.ink, g.space)
                 if (w >= 0.6 * g.space and 0.25 * g.space <= h <= 2.0 * g.space):
                     # merged slurs/fermatas hide the head outline; these are
@@ -422,7 +462,18 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
             head.duration = nearest.duration
             head.direction = nearest.direction
         events.append(head)
+    if stem_heads and binary is not None:
+        events = _merge_open_heads(
+            events, staff, glyphs, binary, bounds, measure_of, clef_at, fifths,
+            signature_limit, signature_end, clef_changes, notes_module)
     if stem_heads:
+        for e in events:
+            if e.kind == "note" and e.glyph is not None:
+                y = refine_head_y(e.glyph, staff, e.x, e.hy)
+                if y != e.hy:
+                    e.hy = y
+                    e.pitch = pitch_at(staff, clef_at(e.x),
+                                       staff_position(staff, y), fifths)
         apply_accidentals(events, staff, glyphs, fifths)
     if binary is not None:
         # A head beyond the first ledger-line position needs that ledger
@@ -438,6 +489,165 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
     if dots:
         apply_dots(events, dots, staff.space)
     return events
+
+
+def _merge_open_heads(events, staff, glyphs, binary, bounds, measure_of, clef_at,
+                      fifths, signature_limit, signature_end, clef_changes,
+                      notes_module):
+    """Give half and whole notes found by their counters their duration.
+
+    A head the glyph readers found already takes the open head's duration;
+    one they missed is added.  Rests and duplicate notes read from the
+    pieces of a whole note cut by line removal are dropped.
+    """
+    space = staff.space
+    # The first measure starts after the clef and signature, not at a
+    # barline.
+    barlines = sorted({x for b in bounds[1:] for x in b}
+                      | ({bounds[-1][1]} if bounds else set()))
+    found = notes_module.open_heads(binary, staff, barlines)
+    # A flat's bowl is a counter too.
+    accidentals = [g for g in glyphs if g.staff == staff.index
+                   and notes_module.accidental_kind(g.ink, g.space)]
+    start = max(signature_limit if signature_limit is not None else 0.0,
+                signature_end, staff.left + 3.0 * space)
+    drop = set()
+    for hx, hy, duration, direction, sure in found:
+        if hx < start:
+            continue
+        if any(g.x0 <= hx <= g.x0 + g.w and g.y0 <= hy <= g.y0 + g.h
+               for g in accidentals):
+            continue
+        if any(abs(hx - cx) <= 2.5 * space for cx, _c in clef_changes or ()):
+            continue
+        measure = measure_of(hx)
+        if measure is None:
+            continue
+        # The glyph readers' head for this counter, if any.
+        near = [e for e in events
+                if e.kind == "note" and id(e) not in drop
+                and abs(e.x - hx) <= 0.6 * space
+                and abs(e.hy - hy) <= 0.7 * space]
+        if not near and not sure:
+            continue
+        for e in events:
+            if (e.kind == "rest" and abs(e.x - hx) <= 1.0 * space
+                    and abs(e.hy - hy) <= 1.2 * space):
+                drop.add(id(e))
+        if near:
+            keep = min(near, key=lambda e: abs(e.hy - hy) + abs(e.x - hx))
+            if abs(keep.hy - hy) > 0.25 * space:
+                # The glyph readers miss the middle of a hollow head; the
+                # counter's centre is exact.
+                keep.hy = hy
+                keep.pitch = pitch_at(staff, clef_at(keep.x),
+                                      staff_position(staff, hy), fifths)
+                keep.glyph = None
+            if keep.duration < duration:
+                keep.duration = duration
+                keep.flexible = False
+            if keep.direction is None:
+                keep.direction = direction
+            for e in near:
+                if e is not keep and abs(e.hy - hy) <= 0.35 * space:
+                    drop.add(id(e))
+            continue
+        pitch = pitch_at(staff, clef_at(hx), staff_position(staff, hy), fifths)
+        events.append(Event(measure, hx, pitch, duration, "note", None,
+                            hy=hy, direction=direction))
+    return [e for e in events if id(e) not in drop]
+
+
+def _signature_end(staff: Staff, glyphs: list[Glyph], time_signature: set[str],
+                   notes_module) -> float:
+    """x where the clef, key and time signature at the staff start end."""
+    space = staff.space
+    band = [g for g in glyphs
+            if g.staff == staff.index
+            and staff.top - 0.5 * space <= g.cy <= staff.bottom + 0.5 * space
+            and g.h >= 0.8 * space]
+    band.sort(key=lambda g: g.x0)
+    end = staff.left
+    for g in band:
+        if g.x0 + g.w <= end:
+            continue
+        # The key signature can stand two spaces off the clef.
+        if g.x0 > end + 2.0 * space:
+            break
+        clef = g.x0 < staff.left + 2.5 * space
+        # A common-time C fills the middle of the staff and has no stem.
+        # (line removal may split it into a body and its tips)
+        common = (1.5 * space <= g.h <= 2.6 * space
+                  and 0.5 * space <= g.w <= 1.8 * space
+                  and abs(g.cy - staff.center) <= 0.5 * space
+                  and not notes_module.stemmed_heads(g.ink, g.space)[0])
+        if (clef or common or g.uid in time_signature
+                or notes_module.accidental_kind(g.ink, g.space) is not None):
+            end = max(end, g.x0 + g.w)
+            continue
+        if g.x0 < end + 0.3 * space and g.w <= 1.2 * space:
+            # pieces of the clef (its dots) and of a broken accidental
+            end = max(end, g.x0 + g.w)
+            continue
+        break
+    return end + 0.5 * space
+
+
+def refine_head_y(g: Glyph, staff: Staff, x: float, y: float) -> float:
+    """Head centre from the head's own top and bottom edges.
+
+    With the staff-line crossings kept, a head touching a line from one side
+    only (just above the top line or below the bottom line) carries that
+    line's piece along; the blob detectors then put the centre a third of a
+    space towards the line and the pitch a step off.  Take the vertical ink
+    run through the head's middle columns and trim a line lying at one end
+    of a run that is too tall for a head.
+    """
+    space = staff.space
+    thick = max(1.0, staff.thickness)
+    ink = g.ink
+    h, w = ink.shape
+    cx, cy = int(round(x - g.x0)), int(round(y - g.y0))
+    if not (0 <= cy < h):
+        return y
+    half = max(1, int(round(0.2 * space)))
+    tops, bottoms = [], []
+    for col in range(max(0, cx - half), min(w, cx + half + 1)):
+        column = ink[:, col]
+        if not column[cy]:
+            continue
+        a = cy
+        while a - 1 >= 0 and column[a - 1]:
+            a -= 1
+        b = cy
+        while b + 1 < h and column[b + 1]:
+            b += 1
+        tops.append(a)
+        bottoms.append(b)
+    if len(tops) < 2:
+        return y
+    top = float(np.median(tops)) + g.y0
+    bottom = float(np.median(bottoms)) + g.y0
+    height = bottom - top + 1
+    if 0.7 * space <= height <= 1.05 * space:
+        return (top + bottom) / 2.0
+    if not (1.05 * space < height <= 1.6 * space):
+        return y
+
+    def on_line(edge):
+        # The line's average height can be off by a pixel or two locally.
+        return any(abs(edge - line) <= 0.5 * thick + 0.2 * space
+                   for line in staff.lines)
+
+    # A head in a space between two lines spans both: its middle is right.
+    top_line, bottom_line = on_line(top), on_line(bottom)
+    if not (top_line or bottom_line):
+        return y
+    if top_line and not bottom_line:
+        top += thick + 1
+    elif bottom_line and not top_line:
+        bottom -= thick + 1
+    return (top + bottom) / 2.0
 
 
 def apply_accidentals(events: list[Event], staff: Staff, glyphs: list[Glyph],

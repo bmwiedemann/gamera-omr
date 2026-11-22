@@ -123,6 +123,26 @@ def _keep_crossings(source: str, continuo: bool) -> bool:
     return source == "piano" or continuo
 
 
+def _drop_incipit(bounds, comps, staff):
+    """Drop the incipit in front of a movement's first system.
+
+    The NBA opens the first system with the old clef and first note before
+    the system barline; the score proper restarts with a clef right after
+    that barline.  A short first measure followed by a clef is that incipit.
+    """
+    if len(bounds) < 2:
+        return bounds
+    space = staff.space
+    x0, x1 = bounds[0]
+    if x1 - x0 > 8.0 * space:
+        return bounds
+    clef = any(x1 <= c.x0 <= x1 + 2.5 * space and c.h >= 2.5 * space
+               and 0.8 * space <= c.w <= 3.0 * space
+               and staff.top - space <= c.cy <= staff.bottom + space
+               for c in comps)
+    return bounds[1:] if clef else bounds
+
+
 def _gamera_version() -> str:
     try:
         import gamera  # noqa: PLC0415
@@ -514,6 +534,8 @@ def cmd_read(args) -> int:
                 flush_bottom=args.source == "nba",
                 reject_stems=args.source == "nba")
             bounds = segments.measure_bounds(staff, barlines)
+        if continuo:
+            bounds = _drop_incipit(bounds, all_comps, staff)
         bounds_all.extend(bounds)
         if x_rhythm and args.tacet_bars:
             for c in segments.find_rest_bars(all_comps, staff):
