@@ -106,8 +106,12 @@ def _decode_piano(staves, items, predictions, dots, fifths, bar, arr, cleaned):
     """Decode a grand-staff system into right/left-hand event streams.
 
     The two staves share measure boundaries; each staff gets its own clef.
+    Notes carry their stem direction so independent voices can be separated
+    afterwards; the clef changes are returned as measure -> clef maps for the
+    MusicXML writer.
     """
     rh, lh, bounds_all = [], [], []
+    rh_clefs, lh_clefs = {}, {}
     comps = segments.components(cleaned.image)
     offset = 0
     pairs = [(staves[i], staves[i + 1] if i + 1 < len(staves) else None)
@@ -130,21 +134,57 @@ def _decode_piano(staves, items, predictions, dots, fifths, bar, arr, cleaned):
         upper_changes = _detect_piano_clefs(comps, upper, starts, "G2")
         lower_changes = (_detect_piano_clefs(comps, lower, starts, "F4")
                          if lower is not None else [])
-        for staff, clef, changes, target in (
-                (upper, "G2", upper_changes, rh),
-                (lower, "F4", lower_changes, lh)):
+
+        def measure_at(x):
+            for i, (x0, x1) in enumerate(bounds):
+                if x0 <= x < x1:
+                    return i
+            return min(range(len(bounds)),
+                       key=lambda i: abs(bounds[i][0] - x)) if bounds else 0
+
+        for staff, clef, changes, target, clef_map in (
+                (upper, "G2", upper_changes, rh, rh_clefs),
+                (lower, "F4", lower_changes, lh, lh_clefs)):
             if staff is None:
                 continue
             ev = decode.decode_staff(
                 staff, items, predictions, bounds, clef, fifths, dots=dots,
                 legacy=True, bar_length=bar, require_head=False,
-                recover_edges=False, clef_changes=changes)
+                recover_edges=False, clef_changes=changes, voices=True)
             for event in ev:
                 event.measure += offset
             target.extend(ev)
+            for x, changed in changes:
+                clef_map[offset + measure_at(x)] = changed
         bounds_all.extend(bounds)
         offset += len(bounds)
-    return rh, lh, bounds_all, offset
+    return rh, lh, bounds_all, offset, rh_clefs, lh_clefs
+
+
+def _assign_piano_voices(part, bounds_all, bar, space, offset):
+    """Give a piano staff its independent voices their own rhythms.
+
+    The staff is split by stem direction only when opposite-direction notes
+    sound together; each voice is then fitted to the printed x positions on
+    its own, so an accompaniment chord no longer merges into the melody's
+    onset and each voice can carry a rest where the other has notes.
+    """
+    groups = decode.split_staff_voices(part, space)
+    if groups is None:
+        groups = [part]
+    # The piano reductions use 32nd notes; 1/8 of a quarter keeps their
+    # printed x positions distinct instead of collapsing a run into a chord.
+    grid = Fraction(1, 8)
+    out = []
+    for voice, events in enumerate(groups):
+        events = decode.normalize_measures(events, offset, bar)
+        events = decode.assign_onsets_from_x(
+            events, bounds_all, bar, grid=grid, anchor=True,
+            chord_tol=0.6 * space)
+        for event in events:
+            event.voice = voice
+        out.extend(events)
+    return out
 
 
 def cmd_doctor(args) -> int:
@@ -292,16 +332,15 @@ def cmd_read(args) -> int:
     tacet = set()
     bar = Fraction(meter.TimeSignature(time_signature).barDuration.quarterLength)
     if piano:
-        rh, lh, bounds_all, offset = _decode_piano(
+        rh, lh, bounds_all, offset, rh_clefs, lh_clefs = _decode_piano(
             staves, items, predictions, dots, fifths, bar, arr, cleaned)
         space = sum(s.space for s in staves) / max(1, len(staves))
-        for part in (rh, lh):
-            part[:] = decode.normalize_measures(part, offset, bar)
-            part[:] = decode.assign_onsets_from_x(
-                part, bounds_all, bar, anchor=True, chord_tol=0.6 * space)
+        rh = _assign_piano_voices(rh, bounds_all, bar, space, offset)
+        lh = _assign_piano_voices(lh, bounds_all, bar, space, offset)
         events = rh + lh
-        musicxml.write_parts([(rh, "G2", "Piano RH"), (lh, "F4", "Piano LH")],
-                             offset, fifths, time_signature, args.out)
+        musicxml.write_piano(rh, lh, offset, fifths, time_signature, args.out,
+                             rh_clef_changes=rh_clefs,
+                             lh_clef_changes=lh_clefs)
         counts = {}
         for event in events:
             counts[event.kind] = counts.get(event.kind, 0) + 1
@@ -383,13 +422,11 @@ def cmd_report(args) -> int:
     x_rhythm = forced_x
 
     if piano:
-        rh, lh, bounds_all, offset = _decode_piano(
+        rh, lh, bounds_all, offset, _rh_clefs, _lh_clefs = _decode_piano(
             staves, items, predictions, [], fifths, bar, arr, cleaned)
         space = sum(s.space for s in staves) / max(1, len(staves))
-        for part in (rh, lh):
-            part[:] = decode.normalize_measures(part, offset, bar)
-            part[:] = decode.assign_onsets_from_x(
-                part, bounds_all, bar, anchor=True, chord_tol=0.6 * space)
+        rh = _assign_piano_voices(rh, bounds_all, bar, space, offset)
+        lh = _assign_piano_voices(lh, bounds_all, bar, space, offset)
         events = rh + lh
         drops, barlines, measures = {}, {}, {}
         fills = decode.measure_fill(rh, offset, bar)

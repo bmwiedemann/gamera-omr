@@ -125,8 +125,10 @@ read with `--source piano`:
 ```
 
 - The two staves are paired into one system and share measure boundaries; the
-  upper staff uses G2 and the lower F4, and the result is a two-part score
-  (`Piano RH`, `Piano LH`).
+  upper staff uses G2 and the lower F4.  The result is **one piano part with two
+  staves** (a `PartStaff` pair behind a brace), with the voices numbered 1–4 on
+  the upper staff and 5–8 on the lower staff, as in the homr reference rather
+  than two separate parts.
 - A `models/piano/model.xml` font model (trained on deskewed piano systems) is
   selected automatically.  Staff removal still runs on RGB/greyscale crops;
   `StackPage.binary()` now converts RGB piano scans through `to_onebit()` instead
@@ -135,26 +137,36 @@ read with `--source piano`:
   not only template matching.  Filled noteheads remain thick blobs while long
   stems and beams are thin; several heads on one long stem become a chord.  The
   old `w <= 0.6*space` stem filter is relaxed to an aspect-ratio test so long
-  stems are not discarded.
+  stems are not discarded, and the tall-component filter keeps wide tall
+  glyphs, since a piano beamed group can span the whole staff.
 - Notehead repair is on for piano as well: a head sitting on a staff line was
   cut in half and looked like an open/partial head, defeating both blob
   detection and pitch.
 - Simultaneous heads within `0.6*space` share an onset and duration, and the
   MusicXML writer emits them as chords.
-- **Clef changes are followed.**  At each measure start the engine looks for a
-  clef-sized glyph; a bass clef is recognised by its two dots, otherwise the
-  clef is treble.  Pitches after the change use the new clef (p-001-s0 changes
-  the lower staff from F4 to G2 before its last measure).
+- **Independent voices are separated by stem direction.**  Stems, beams and
+  flags sit on one side of the noteheads, so the ink outside the head band
+  labels a note as stem-up or stem-down.  A staff is split into two voices
+  only when notes of opposite direction actually sound together; a single
+  homophonic line also flips its stems with the note's position on the staff
+  and stays one voice.  Each voice then gets its own x→onset fit, so an
+  accompaniment chord no longer merges into the melody's onset and each voice
+  can carry a rest where the other has notes.  A 1/8-quarter onset grid keeps
+  printed 32nd-note runs distinct instead of collapsing them into one chord.
+- **Clef changes are followed and written.**  At each measure start the engine
+  looks for a clef-sized glyph; a bass clef is recognised by its two dots,
+  otherwise the clef is treble.  Pitches after the change use the new clef,
+  and the change is emitted as the staff's clef in the MusicXML
+  (p-001-s0 changes the lower staff from F4 to G2 before its last measure).
 
 Current status: `p-001-s0` now has the correct 5 measures (the grand-staff
-barline test removed long stems mistaken for bars), 60 note events (39
-note/chord elements, 12 chords); the raw page previously produced 1 note.  The
-homr reference for this system has 44 note/chord elements and 14 chords, and
-the pitch agreement is about 0.71; ours is close but still less complete.  `p-050-s0` reads 32 note
-elements over 8 measures.  Known gaps: clef changes inside a system are not
-followed (the bass staff switches to treble in the last measure of p-001-s0),
-voices are approximated by simultaneous onsets, and grand-staff deskewing is
-not implemented.
+barline test removed long stems mistaken for bars) and 60 note events (49 note
+or chord elements, 11 chords, with a 32nd-note run in the last measure of each
+hand).  The homr reference for this system has 44 note/chord elements and 14
+chords; the pitch agreement is about 0.80, close but still less complete.
+`p-050-s0` reads 46 note events over 7 measures.  Known gaps: voices beyond
+the two stem directions in a staff are not separated, C clefs are not
+classified, and grand-staff deskewing is not implemented.
 
 ## Current results
 
@@ -263,7 +275,7 @@ editable, and runs a smoke test.
 # notehead repair is automatic for Sibley; force it for another noisy print
 .venv/bin/python -m gamera_omr.cli read ... --repair-crossings -o /tmp/old.musicxml
 
-# piano grand-staff crop (two staves, two output parts)
+# piano grand-staff crop (one part, two staves, independent voices)
 .venv/bin/python -m gamera_omr.cli read \
     --image ~/git/music/work/piano_all/p-001-s0.png \
     --source piano --voice P --movement 1 -o /tmp/piano.musicxml
