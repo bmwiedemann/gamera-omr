@@ -1,0 +1,41 @@
+From 44951ca89671d9f170d1587087fc8f5ddf18a3ef Mon Sep 17 00:00:00 2001
+From: "Bernhard M. Wiedemann" <bwiedemann@suse.de>
+Date: Sun, 22 Nov 2026 07:48:30 +0100
+Subject: [PATCH 6/6] Port the GUI module loader from imp to importlib
+
+imp.load_source was removed in Python 3.12.  The optional GUI loads the
+script named on the command line; use importlib.util.spec_from_file_location
+and exec_module instead.
+
+Co-Authored-By: Claude Code <noreply@anthropic.com>
+---
+ gamera-4/gamera/gui/gui.py | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/gamera-4/gamera/gui/gui.py b/gamera-4/gamera/gui/gui.py
+index b21f0f7..36d9d82 100644
+--- a/gamera-4/gamera/gui/gui.py
++++ b/gamera-4/gamera/gui/gui.py
+@@ -29,7 +29,7 @@ import inspect
+ 
+ # Python standard library
+ # import interactive
+-import imp
++import importlib.util
+ import os
+ import os.path
+ import sys
+@@ -334,7 +334,9 @@ class ShellFrame(wx.Frame):
+             file = sys.argv[0]
+             try:
+                 name = os.path.basename(file)[:-3]
+-                module = imp.load_source(name, file)
++                spec = importlib.util.spec_from_file_location(name, file)
++                module = importlib.util.module_from_spec(spec)
++                spec.loader.exec_module(module)
+                 self.shell.locals[name] = module
+                 self.shell.push(name)
+                 imported = True
+-- 
+2.56.0
+

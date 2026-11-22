@@ -1,7 +1,7 @@
 From 5cb9dee7189862e711873952d4f5b88ea4d4dba3 Mon Sep 17 00:00:00 2001
 From: "Bernhard M. Wiedemann" <bwiedemann@suse.de>
 Date: Sat, 21 Nov 2026 19:48:43 +0100
-Subject: [PATCH 4/5] Port the staff finders to Python 3 integer semantics
+Subject: [PATCH 4/6] Port the staff finders to Python 3 integer semantics
 
 Python 2 "/" on ints floored; Python 3 returns floats, which break list
 indexing/slicing and Int() plugin arguments.  Use "//" wherever the

@@ -1,7 +1,7 @@
 From 799aef903b0c845a22a824a456c52315a48b5ca6 Mon Sep 17 00:00:00 2001
 From: "Bernhard M. Wiedemann" <bwiedemann@suse.de>
 Date: Sat, 21 Nov 2026 19:49:15 +0100
-Subject: [PATCH 5/5] Use ndarray.tobytes() in numpy_io (tostring was removed
+Subject: [PATCH 5/6] Use ndarray.tobytes() in numpy_io (tostring was removed
  in numpy 2)
 
 from_numpy() passed the buffer with array.tostring(), which numpy 2

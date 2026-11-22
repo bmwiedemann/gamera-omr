@@ -1,7 +1,7 @@
 From a3fdc635827409a86212f49bb2122d5d93de18c9 Mon Sep 17 00:00:00 2001
 From: "Bernhard M. Wiedemann" <bwiedemann@suse.de>
 Date: Sat, 21 Nov 2026 19:48:43 +0100
-Subject: [PATCH 2/5] Port kNN and GUI buffer handling to Python 3.13
+Subject: [PATCH 2/6] Port kNN and GUI buffer handling to Python 3.13
 
 Python 3.13 removed the old buffer API: PyObject_CheckReadBuffer,
 PyObject_AsReadBuffer and PyObject_AsWriteBuffer.  Add

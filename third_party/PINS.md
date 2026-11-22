@@ -19,6 +19,7 @@ Applied as `third_party/patches/000*.patch`:
 | `a1c3a1f` | Port the legacy io.py array readers/writers to numpy 2 |
 | `5cb9dee` | Port the staff finders to Python 3 integer semantics |
 | `799aef9` | Use ndarray.tobytes() in numpy_io (tostring was removed in numpy 2) |
+| `44951ca` | Port the GUI module loader from imp to importlib |
 
 Build/test status on 2026-11-21 with Python 3.13.14, numpy 2.5.5, gcc 16.2:
 

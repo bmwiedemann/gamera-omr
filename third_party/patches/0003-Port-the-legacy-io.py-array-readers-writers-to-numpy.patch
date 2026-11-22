@@ -1,7 +1,7 @@
 From a1c3a1f054b975318dc83550fe271c7838251cfd Mon Sep 17 00:00:00 2001
 From: "Bernhard M. Wiedemann" <bwiedemann@suse.de>
 Date: Sat, 21 Nov 2026 19:48:43 +0100
-Subject: [PATCH 3/5] Port the legacy io.py array readers/writers to numpy 2
+Subject: [PATCH 3/6] Port the legacy io.py array readers/writers to numpy 2
 
 numpy 2 removed binary-mode np.fromstring() and ndarray.tostring(),
 which every BRIK/bget/bput reader and writer in io.py uses.
