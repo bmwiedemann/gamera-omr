@@ -349,13 +349,20 @@ def _repair_line_crossings(arr: np.ndarray, staff: Staff):
 
 def remove_staff_lines(page: StackPage, staves: list[Staff], tolerance: float = 1.0,
                        *, repair: bool = False,
-                       cut_barlines: list[float] | None = None):
+                       cut_barlines: list[float] | None = None,
+                       keep_crossings: bool = False):
     """Return a new image with the staff lines removed.
 
     A column's black run is erased when it is no thicker than the line plus
     tolerance.  Thicker runs (noteheads, clefs, stems, barlines) keep their
     non-line pixels; runs spanning most of the staff (barlines, stems) are left
     untouched.
+
+    `keep_crossings=True` leaves every run thicker than a line untouched
+    instead of cutting the line band out of it.  The cut splits a notehead on
+    a line into two halves (whose centres are half a space off) and breaks
+    stems at every line; keeping the run avoids both.  The glyph models of the
+    voice stacks were trained on cut glyphs, so callers choose it per edition.
 
     `repair=True` reconnects noteheads cut by the erased line.  It helps the
     old prints, where heads sit on thick lines, but slightly harms the clean
@@ -382,6 +389,8 @@ def remove_staff_lines(page: StackPage, staves: list[Staff], tolerance: float = 
                     continue  # barline, clef, or long stem: keep it
                 if length <= thick + 2 * tolerance:
                     column[a:b + 1] = 0
+                elif keep_crossings:
+                    continue  # a head or stem on the line: keep it whole
                 else:
                     lo = max(a, int(round(y - thick / 2)))
                     hi = min(b, int(round(y + thick / 2)))

@@ -53,9 +53,11 @@ class Glyph:
 
 def extract(page, staves: list[Staff], page_name: str | None = None,
             *, repair: bool = False,
-            cut_barlines: list[float] | None = None) -> list[Glyph]:
+            cut_barlines: list[float] | None = None,
+            keep_crossings: bool = False) -> list[Glyph]:
     cleaned = remove_staff_lines(page, staves, repair=repair,
-                                 cut_barlines=cut_barlines)
+                                 cut_barlines=cut_barlines,
+                                 keep_crossings=keep_crossings)
     comps = segments.components(cleaned.image)
     name = page_name or page.path.stem
     out = []

@@ -12,6 +12,7 @@ from pathlib import Path
 from music21 import meter
 
 from . import classify, config, decode, deskew, glyphs, musicxml, notes, segments
+from . import staffs
 from .staffs import remove_staff_lines
 
 
@@ -26,11 +27,70 @@ def _prepare(args):
     # Piano systems are grand staves: the per-system band model does not
     # apply yet, so they use the original image and per-staff clefs below.
     enabled = not args.no_deskew and source != "piano"
-    return deskew.prepare_page(args.image, backend=args.backend,
-                               enabled=enabled,
-                               flush_barlines=_flush_barlines(source),
-                               flush_bottom_barlines=source == "nba",
-                               reject_stem_barlines=source == "nba")
+    page, staves, diag = deskew.prepare_page(
+        args.image, backend=args.backend, enabled=enabled,
+        flush_barlines=_flush_barlines(source),
+        flush_bottom_barlines=source == "nba",
+        reject_stem_barlines=source == "nba")
+    if source == "piano" and not args.no_deskew:
+        # A grand staff gets a per-staff linear straightening instead: a
+        # drift of half a space across the system shifts every pitch by a
+        # step at one end.
+        straight = deskew.straighten_staves(page, staves)
+        if straight is not None:
+            try:
+                new_staves, new_diag = staffs.find_staves(straight,
+                                                          args.backend)
+            except staffs.StaffFindError:
+                new_staves = None
+            if new_staves is not None and len(new_staves) == len(staves):
+                new_diag["deskew"] = dict(diag.get("deskew", {}),
+                                          applied=True, reason="grand_staff")
+                page, staves, diag = straight, new_staves, new_diag
+    if source == "piano":
+        _share_grand_staff_extent(page.array(), staves)
+    return page, staves, diag
+
+
+def _line_coverage(arr, staff):
+    """Per column: are at least four of the staff's five lines inked?"""
+    import numpy as np  # noqa: PLC0415
+
+    h, _w = arr.shape
+    tol = max(1, int(round(0.15 * staff.space)))
+    count = 0
+    for y in staff.lines:
+        y = int(round(y))
+        count = count + arr[max(0, y - tol):min(h, y + tol + 1)].any(axis=0)
+    return count >= min(4, len(staff.lines))
+
+
+def _share_grand_staff_extent(arr, staves) -> None:
+    """The two staves of a grand staff start and end together.
+
+    The brace and the system barline join them, so when the detected extents
+    of the two staves differ by several spaces, one of them was cut short by
+    broken or drifting lines, or ran on into a border line.  Each staff takes
+    the partner's end where its own lines are (or are not) really inked.
+    """
+    for i in range(0, len(staves) - 1, 2):
+        pair = (staves[i], staves[i + 1])
+        space = max(pair[0].space, pair[1].space, 1.0)
+        cover = [_line_coverage(arr, s) for s in pair]
+        for k, staff in enumerate(pair):
+            other = pair[1 - k]
+            lo, hi = int(other.left), int(staff.left)
+            if hi - lo > 3.0 * space and cover[k][lo:hi].mean() >= 0.8:
+                staff.left = other.left
+            lo, hi = int(staff.left), int(other.left)
+            if hi - lo > 3.0 * space and cover[k][lo:hi].mean() < 0.5:
+                staff.left = other.left
+            lo, hi = int(staff.right), int(other.right)
+            if hi - lo > 3.0 * space and cover[k][lo:hi].mean() >= 0.8:
+                staff.right = other.right
+            lo, hi = int(other.right), int(staff.right)
+            if hi - lo > 3.0 * space and cover[k][lo:hi].mean() < 0.5:
+                staff.right = other.right
 
 
 def _load_predictions(corpus: Path, args, source: str):
@@ -45,12 +105,22 @@ def _load_predictions(corpus: Path, args, source: str):
     if not args.model and source.startswith("bga"):
         scores = [p["confidence"] for p in predictions.values()]
         if scores and sum(scores) / len(scores) < 0.85:
-            alternative = Path("models/bga/model-deskew.xml")
+            alternative = models_dir() / "bga" / "model-deskew.xml"
             if alternative.exists():
                 model_path = alternative
                 predictions = classify.predict(
                     classify.load_model(alternative), corpus)
     return predictions, model_path
+
+
+def _keep_crossings(source: str, continuo: bool) -> bool:
+    """Keep heads and stems on staff lines whole (see remove_staff_lines).
+
+    The piano reductions and the NBA continuo crops are read with the
+    piano/common models and many notes sit on lines; the voice-stack models
+    were trained on glyphs with the line band cut out.
+    """
+    return source == "piano" or continuo
 
 
 def _gamera_version() -> str:
@@ -65,9 +135,12 @@ def _gamera_version() -> str:
 def _detect_piano_clefs(comps, staff, starts, initial):
     """Find clef glyphs at system/measure starts and whether they are F4.
 
-    A clef is a glyph roughly 2.2-4.2 staff spaces tall and 0.8-2.2 wide.
-    A bass clef is recognised by its two dots to the right; otherwise the
-    clef is treble (G2).  Returns (x, clef) changes from `initial`.
+    A bass clef is a glyph roughly 2.2-4.2 staff spaces tall and 0.8-2.2
+    wide, recognised by its two dots to the right.  A treble clef, even at
+    cue size, is taller and reaches above the top line down to the bottom
+    line; a sharp or a stemmed note at a measure start has the bass clef's
+    size but neither the dots nor that extent, so it is not a clef.  Returns
+    (x, clef) changes from `initial`.
     """
     space = staff.space
     changes = []
@@ -77,7 +150,7 @@ def _detect_piano_clefs(comps, staff, starts, initial):
             c for c in comps
             if (x0 - 0.5 * space <= c.cx <= x0 + 5.5 * space
                 and staff.top - 0.5 * space <= c.cy <= staff.bottom + 0.5 * space
-                and 2.2 * space <= c.h <= 4.2 * space
+                and 2.2 * space <= c.h <= 7.5 * space
                 and 0.8 * space <= c.w <= 2.2 * space
                 and c.area >= 0.25 * c.w * c.h)
         ]
@@ -92,11 +165,24 @@ def _detect_piano_clefs(comps, staff, starts, initial):
                 and 2 <= d.w <= 0.65 * space and 2 <= d.h <= 0.85 * space
                 and d.solidity >= 0.45)
         ]
-        bass = any(
+        bass = clef.h <= 4.2 * space and any(
             0.2 * space <= abs(a.cy - b.cy) <= 1.5 * space
             and abs(a.cx - b.cx) <= 0.8 * space
             for i, a in enumerate(dots) for b in dots[i + 1:]
         )
+        # A mid-system treble clef is cue-sized: about 3.6-6 spaces tall,
+        # wider than a sharp, hanging below the bottom line, with its loop
+        # inside the staff.  A sharp is narrower and shorter, and a stemmed
+        # chord on ledger lines is taller.
+        treble = (not bass and 3.6 * space <= clef.h <= 6.0 * space
+                  and clef.w >= 1.3 * space
+                  and clef.y0 >= staff.top - 1.5 * space
+                  and clef.y0 + clef.h >= staff.bottom + 0.3 * space
+                  and _has_loop(clef, (0.5 * space, 1.3 * space),
+                                (staff.top + 0.5 * space,
+                                 staff.bottom - 0.3 * space)))
+        if not (bass or treble):
+            continue
         detected = "F4" if bass else "G2"
         if not bass and x0 <= starts[0] + 0.5 * space:
             # The opening clef follows the grand-staff convention.  Without
@@ -108,6 +194,33 @@ def _detect_piano_clefs(comps, staff, starts, initial):
             changes.append((clef.cx, detected))
             current = detected
     return changes
+
+
+def _has_loop(component, heights: tuple[float, float],
+              rows: tuple[float, float]) -> bool:
+    """True when the component encloses a hole whose height lies within
+    `heights` and whose centre lies between the absolute `rows`.
+
+    The treble clef's loop is under a staff space high and sits inside the
+    staff; a flag curling back to its stem encloses a much taller hole, and
+    ledger lines joined to a stem enclose space outside the staff.
+    """
+    import cv2  # noqa: PLC0415
+    import numpy as np  # noqa: PLC0415
+
+    ink = (np.asarray(component.glyph.to_numpy()) > 0).astype(np.uint8) * 255
+    contours, hierarchy = cv2.findContours(ink, cv2.RETR_CCOMP,
+                                           cv2.CHAIN_APPROX_SIMPLE)
+    if hierarchy is None:
+        return False
+    for contour, h in zip(contours, hierarchy[0]):
+        if h[3] == -1:
+            continue
+        _x, y, _w, hh = cv2.boundingRect(contour)
+        centre = component.y0 + y + hh / 2.0
+        if heights[0] <= hh <= heights[1] and rows[0] <= centre <= rows[1]:
+            return True
+    return False
 
 
 def _decode_piano(staves, items, predictions, dots, fifths, bar, arr, cleaned):
@@ -158,7 +271,8 @@ def _decode_piano(staves, items, predictions, dots, fifths, bar, arr, cleaned):
             ev = decode.decode_staff(
                 staff, items, predictions, bounds, clef, fifths, dots=dots,
                 legacy=True, bar_length=bar, require_head=False,
-                recover_edges=False, clef_changes=changes, voices=True)
+                recover_edges=False, clef_changes=changes, voices=True,
+                binary=arr, stem_heads=True)
             for event in ev:
                 event.measure += offset
             target.extend(ev)
@@ -188,7 +302,8 @@ def _assign_piano_voices(part, bounds_all, bar, space, offset):
         events = decode.normalize_measures(events, offset, bar)
         events = decode.assign_onsets_from_x(
             events, bounds_all, bar, grid=grid, anchor=True,
-            chord_tol=0.6 * space)
+            chord_tol=0.6 * space, sequence=True, proportional=True,
+            metric_snap=True)
         for event in events:
             event.voice = voice
         out.extend(events)
@@ -300,11 +415,28 @@ def cmd_classify(args) -> int:
     return 0
 
 
+def models_dir() -> Path:
+    """The glyph models: $GAMERA_OMR_MODELS, else the repository's models/.
+
+    Resolving against the package instead of the working directory lets the
+    CLI run from anywhere; a `models/` in the working directory is the last
+    resort for an installed copy without the repository.
+    """
+    import os  # noqa: PLC0415
+
+    env = os.environ.get("GAMERA_OMR_MODELS")
+    if env:
+        return Path(env)
+    repo = Path(__file__).resolve().parents[2] / "models"
+    return repo if repo.is_dir() else Path("models")
+
+
 def default_model(source: str) -> Path:
     """Prefer a model trained for the edition's font, else the common one."""
     base = "bga" if source.startswith("bga") else source
-    candidate = Path("models") / base / "model.xml"
-    return candidate if candidate.exists() else Path("models/common/model.xml")
+    root = models_dir()
+    candidate = root / base / "model.xml"
+    return candidate if candidate.exists() else root / "common" / "model.xml"
 
 
 def cmd_read(args) -> int:
@@ -322,8 +454,9 @@ def cmd_read(args) -> int:
         for i in range(0, len(staves) - 1, 2):
             piano_barlines.extend(
                 segments.find_grand_barlines(arr, staves[i], staves[i + 1]))
+    keep = _keep_crossings(args.source, continuo)
     items = glyphs.extract(page, staves, repair=repair,
-                           cut_barlines=piano_barlines)
+                           cut_barlines=piano_barlines, keep_crossings=keep)
     with tempfile.TemporaryDirectory() as td:
         corpus = Path(td)
         glyphs.save_corpus(items, corpus)
@@ -335,7 +468,8 @@ def cmd_read(args) -> int:
     forced_x = args.source in ("rosler", "sibley") or continuo
     x_rhythm = forced_x
     cleaned = remove_staff_lines(page, staves, repair=repair,
-                                 cut_barlines=piano_barlines)
+                                 cut_barlines=piano_barlines,
+                                 keep_crossings=keep)
     all_comps = segments.components(cleaned.image)
     dots = []
     if not args.no_dots:
@@ -392,7 +526,9 @@ def cmd_read(args) -> int:
                                            bar_length=bar,
                                            require_head=x_rhythm and not continuo,
                                            recover_edges=args.source.startswith("bga"),
-                                           beam_row_heads=continuo)
+                                           beam_row_heads=continuo,
+                                           binary=arr if continuo else None,
+                                           stem_heads=continuo)
         for event in staff_events:
             event.measure += offset
         events.extend(staff_events)
@@ -406,7 +542,10 @@ def cmd_read(args) -> int:
         events = decode.assign_onsets_from_x(
             events, bounds_all, bar,
             anchor=(args.source in ("rosler", "bga", "bga2")
-                    or continuo))
+                    or continuo),
+            proportional=continuo, metric_snap=continuo,
+            sequence=continuo,
+            chord_tol=(0.6 * staves[0].space if continuo and staves else 0.0))
     else:
         decode.fit_durations(events, offset, bar)
         events = decode.assign_onsets(events, offset, bar)
@@ -440,15 +579,17 @@ def cmd_report(args) -> int:
         for i in range(0, len(staves) - 1, 2):
             piano_barlines.extend(
                 segments.find_grand_barlines(arr, staves[i], staves[i + 1]))
+    keep = _keep_crossings(args.source, continuo)
     items = glyphs.extract(page, staves, repair=repair,
-                           cut_barlines=piano_barlines)
+                           cut_barlines=piano_barlines, keep_crossings=keep)
     with tempfile.TemporaryDirectory() as td:
         corpus = Path(td)
         glyphs.save_corpus(items, corpus)
         predictions, model_path = _load_predictions(corpus, args, args.source)
 
     cleaned = remove_staff_lines(page, staves, repair=repair,
-                                 cut_barlines=piano_barlines)
+                                 cut_barlines=piano_barlines,
+                                 keep_crossings=keep)
     all_comps = segments.components(cleaned.image)
     clef = "G2" if piano else config.clef(args.source, args.voice)
     fifths = config.key_fifths(args.movement) or 0

@@ -495,8 +495,48 @@ def split_beam_group(ink: np.ndarray, space: float, templates=None,
                 group_count += 1
     out = []
     for hx, hy in heads:
-        out.append((hx, hy, Fraction(1, 2 ** min(group_count, 4))))
+        beams = _beams_at(ink, space, hx, hy, stem_boxes)
+        if not beams:
+            beams = group_count
+        out.append((hx, hy, Fraction(1, 2 ** min(beams, 4))))
     return out
+
+
+def _beams_at(ink: np.ndarray, space: float, hx: float, hy: float,
+              stem_boxes) -> int | None:
+    """Number of beams on the stem of the head at (hx, hy).
+
+    Beams cross the stem near its free end; just beside the stem each beam
+    is a separate thick run in the column.  Both sides are tried (a 16th
+    hook points one way only) and the larger count is taken.
+    """
+    h, w = ink.shape
+    best = None
+    for x0, y0, x1, y1, scx in stem_boxes:
+        if abs(scx - hx) > 1.0 * space:
+            continue
+        if not (y0 - 1.0 * space <= hy <= y1 + 1.0 * space):
+            continue
+        d = abs(scx - hx)
+        if best is None or d < best[0]:
+            best = (d, x0, y0, x1, y1)
+    if best is None:
+        return None
+    _d, x0, y0, x1, y1 = best
+    reach = int(round(2.5 * space))
+    if abs(hy - y0) > abs(hy - y1):
+        lo, hi = y0, min(y1, y0 + reach)       # beams at the top end
+    else:
+        lo, hi = max(y0, y1 - reach), y1 + 1   # beams at the bottom end
+    if hi - lo < 0.5 * space:
+        return None
+    count = 0
+    for cx in (x0 - 3, x1 + 3):
+        if not 0 <= cx < w:
+            continue
+        runs = [b - a + 1 for a, b in _column_runs(ink[lo:hi, cx])]
+        count = max(count, sum(1 for r in runs if r >= 0.2 * space))
+    return count or None
 
 
 def overlay(page_path, staff: Staff, masks: Masks, out_path, *, image=None):
@@ -518,3 +558,278 @@ def overlay(page_path, staff: Staff, masks: Masks, out_path, *, image=None):
         cv2.putText(img, f"{n.pitch or '?'}/{n.duration}", (n.x0, n.y0 - 3),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 0, 0), 1, cv2.LINE_AA)
     cv2.imwrite(str(out_path), img)
+
+
+def stemmed_heads(ink: np.ndarray, space: float, templates=None):
+    """Heads of a single stemmed note or chord, with their duration.
+
+    Returns ([(head_x, head_y, duration)], stem direction), or ([], None)
+    when the glyph has no stem with a head at its end; the direction is
+    "accidental" for a sharp/natural and "nohead" when blobs were found but
+    none hangs off the stem like a notehead.  The row-width head finder in `decode`
+    takes the widest band of rows, which on a note with a flag mixes the
+    head with the flag; here the stem is found first, heads are looked for
+    as thick blobs (or template matches for open heads) at its end, and the
+    opposite end tells a flag from a plain stem.
+    """
+    h, w = ink.shape
+    # A sharp or natural has two parallel vertical strokes about half a
+    # space apart (often broken where a staff line crossed them); a note or
+    # chord has a single stem.
+    if _two_strokes(ink, space):
+        return [], "accidental"
+    stem = _longest_vertical(ink)
+    if stem is None or stem[2] - stem[1] + 1 < 2.0 * space:
+        return [], None
+    scx, top, bottom = stem
+    sx, sw = int(scx) - 1, 3
+    candidates = list(_distance_heads(ink, space))
+    for x, y in _erosion_heads(ink, space):
+        if all(abs(x - cx) > 0.5 * space or abs(y - cy) > 0.5 * space
+               for cx, cy in candidates):
+            candidates.append((x, y))
+    filled = [True] * len(candidates)
+    if templates:
+        for score, x, y in match_heads(ink, space, templates, threshold=0.75):
+            if all(abs(x - cx) > 0.6 * space or abs(y - cy) > 0.6 * space
+                   for cx, cy in candidates):
+                candidates.append((float(x), float(y)))
+                filled.append(False)
+    at_top, at_bottom = [], []
+    centred = 0
+    for (x, y), is_filled in zip(candidates, filled):
+        # A head hangs off one side of its stem; a blob centred on the
+        # stroke is the crossbar of an accidental.
+        if abs(x - scx) < 0.3 * space:
+            centred += 1
+            continue
+        if abs(x - scx) > 1.1 * space:
+            continue
+        if not (top - 0.8 * space <= y <= bottom + 0.8 * space):
+            continue
+        # Heads sit at one end of the stem (a chord stacks them from there);
+        # the other end is free or carries a flag.
+        if y - top <= bottom - y:
+            at_top.append((x, y, is_filled))
+        else:
+            at_bottom.append((x, y, is_filled))
+    if at_top and at_bottom:
+        # A flag's thick root looks like a blob too.  The head end is the
+        # one whose blobs look like the page's noteheads; without templates
+        # the end with the more compact blob wins.
+        def end_score(group):
+            return max(_head_likeness(ink, space, x, y, templates)
+                       for x, y, _f in group)
+
+        if end_score(at_top) >= end_score(at_bottom):
+            at_bottom = []
+        else:
+            at_top = []
+    heads = at_top or at_bottom
+    # Heads hang left of an up-stem and right of a down-stem; a blob on the
+    # other side is only a head as the second of an interval (next to a
+    # proper head), otherwise it is the end of a flag.
+    proper = [hd for hd in heads
+              if (hd[0] > scx if at_top else hd[0] < scx)]
+    heads = [hd for hd in heads
+             if hd in proper
+             or any(abs(hd[1] - p[1]) <= 0.8 * space for p in proper)]
+    if not heads:
+        if centred and w <= 1.4 * space:
+            return [], "accidental"
+        # A stem but no head hanging off it the way heads do: a clef body,
+        # a flag fragment or a letter, not a note.
+        return [], "nohead" if candidates else None
+    if at_top:
+        direction = "down"
+        free_rows = (int(max(y for _x, y, _f in heads) + 0.8 * space),
+                     bottom + 1)
+    else:
+        direction = "up"
+        free_rows = (top, int(min(y for _x, y, _f in heads) - 0.8 * space))
+    a, b = max(0, free_rows[0]), min(h, free_rows[1])
+    flagged = False
+    if b - a >= 1.0 * space:
+        region = ink[a:b].copy()
+        lo = max(0, int(sx - 1))
+        hi = min(w, int(sx + sw + 1))
+        region[:, lo:hi] = 0
+        cols = np.flatnonzero(region.any(axis=0))
+        flagged = len(cols) > 0 and (cols[-1] - cols[0] + 1) >= 0.45 * space
+    # A head found only by template matching may still be filled (a blob
+    # joined to an accidental is too wide for the blob detectors); an open
+    # head has a light centre.
+    def solid(x, y):
+        r = max(1, int(round(0.25 * space)))
+        core = ink[max(0, int(y) - r):int(y) + r + 1,
+                   max(0, int(x) - r):int(x) + r + 1]
+        return core.size > 0 and float(core.mean()) >= 0.75
+
+    heads = [(x, y, f or solid(x, y)) for x, y, f in heads]
+    # Open heads are half notes; a filled head with a flag is an eighth.
+    open_head = not any(f for _x, _y, f in heads)
+    if open_head:
+        duration = Fraction(2)
+    elif flagged:
+        duration = Fraction(1, 2)
+    else:
+        duration = Fraction(1)
+    return [(x, y, duration) for x, y, _f in heads], direction
+
+
+def _longest_vertical(ink: np.ndarray):
+    """(x, top, bottom) of the longest vertical ink run: a note's stem.
+
+    A morphological opening would merge the stem with a flag that hugs it;
+    the single longest column run does not.
+    """
+    h, w = ink.shape
+    best = None
+    for x in range(w):
+        runs = _column_runs(ink[:, x])
+        for a, b in runs:
+            if best is None or b - a > best[2] - best[1]:
+                best = (float(x), a, b)
+    if best is None:
+        return None
+    # Centre the stem across its width (columns with nearly as long a run).
+    x0 = x1 = int(best[0])
+    length = best[2] - best[1]
+
+    def long_run(x):
+        return any(b - a >= 0.85 * length for a, b in _column_runs(ink[:, x]))
+
+    while x0 - 1 >= 0 and long_run(x0 - 1) and x1 - x0 < 6:
+        x0 -= 1
+    while x1 + 1 < w and long_run(x1 + 1) and x1 - x0 < 6:
+        x1 += 1
+    return ((x0 + x1) / 2.0, best[1], best[2])
+
+
+def _column_runs(column: np.ndarray):
+    idx = np.flatnonzero(column)
+    if len(idx) == 0:
+        return []
+    breaks = np.flatnonzero(np.diff(idx) > 1)
+    starts = np.r_[idx[0], idx[breaks + 1]]
+    ends = np.r_[idx[breaks], idx[-1]]
+    return list(zip(starts.tolist(), ends.tolist()))
+
+
+def _two_strokes(ink: np.ndarray, space: float) -> bool:
+    """Two parallel vertical strokes about half a space apart (# or natural)."""
+    h, w = ink.shape
+    if w > 1.6 * space:
+        return False
+    # Ink coverage per column, tolerant of small breaks in the strokes.
+    cover = ink.astype(bool).sum(axis=0)
+    tall = cover >= 1.8 * space
+    groups = []
+    start = None
+    for x in range(w + 1):
+        on = x < w and tall[x]
+        if on and start is None:
+            start = x
+        elif not on and start is not None:
+            groups.append((start, x - 1))
+            start = None
+    if len(groups) != 2:
+        return False
+    (a0, a1), (b0, b1) = groups
+    gap = (b0 + b1) / 2.0 - (a0 + a1) / 2.0
+    return (0.25 * space <= gap <= 1.0 * space
+            and max(a1 - a0, b1 - b0) + 1 <= 0.35 * space)
+
+
+def _head_likeness(ink: np.ndarray, space: float, x: float, y: float,
+                   templates) -> float:
+    """How much the ink around (x, y) looks like a notehead."""
+    r = max(2, int(round(0.8 * space)))
+    x0, x1 = max(0, int(x) - r), min(ink.shape[1], int(x) + r + 1)
+    y0, y1 = max(0, int(y) - r), min(ink.shape[0], int(y) + r + 1)
+    patch = ink[y0:y1, x0:x1].astype(np.float32)
+    best = 0.0
+    for tpl in templates or ():
+        if tpl.shape[0] > patch.shape[0] or tpl.shape[1] > patch.shape[1]:
+            continue
+        res = cv2.matchTemplate(patch, tpl.astype(np.float32),
+                                cv2.TM_CCOEFF_NORMED)
+        best = max(best, float(res.max()))
+    if templates:
+        return best
+    # No templates: a head is a solid ellipse, a flag root a thin wedge.
+    dt = cv2.distanceTransform(_u8(ink[y0:y1, x0:x1] > 0), cv2.DIST_L2, 5)
+    return float(dt.max()) / max(1.0, space)
+
+
+def accidental_kind(ink: np.ndarray, space: float) -> str | None:
+    """'sharp', 'natural' or 'flat' for an isolated accidental glyph.
+
+    Sharps and naturals both have two vertical strokes; a natural is
+    narrower (about 0.8 of a space against 1.1).  A flat is one stroke on
+    the left with a closed bowl at its foot.
+    """
+    h, w = ink.shape
+    if not (1.6 * space <= h <= 3.8 * space):
+        return None
+    if _two_strokes(ink, space) and h >= 2.3 * space:
+        if 0.95 * space <= w <= 1.45 * space:
+            return "sharp"
+        if 0.55 * space <= w < 0.95 * space:
+            return "natural"
+        return None
+    if not (0.5 * space <= w <= 1.05 * space and h <= 2.9 * space):
+        return None
+    stem = _longest_vertical(ink)
+    if stem is None or stem[2] - stem[1] + 1 < 1.5 * space:
+        return None
+    if stem[0] > 0.4 * w or stem[2] < h - 0.25 * space:
+        return None
+    contours, hierarchy = cv2.findContours(_u8(ink), cv2.RETR_CCOMP,
+                                           cv2.CHAIN_APPROX_SIMPLE)
+    if hierarchy is None:
+        return None
+    for contour, hh in zip(contours, hierarchy[0]):
+        if hh[3] == -1:
+            continue
+        _x, y, _w, ch = cv2.boundingRect(contour)
+        if y + ch / 2.0 >= 0.5 * h:
+            return "flat"
+    return None
+
+
+def lone_head(ink: np.ndarray, space: float):
+    """(x, y) of a notehead that lost its stem, or None.
+
+    The blob is wider than tall, solid, about one space high, and at most a
+    short stem stub remains; an eighth rest is taller than wide and a
+    quarter rest or a letter has no head-sized solid core.
+    """
+    h, w = ink.shape
+    if not (0.8 * space <= w <= 1.8 * space and 0.6 * space <= h <= 2.8 * space):
+        return None
+    blobs = _erosion_heads(ink, space) or _distance_heads(ink, space)
+    if len(blobs) != 1:
+        return None
+    x, y = blobs[0]
+    rows = ink[max(0, int(y - 0.7 * space)):int(y + 0.7 * space) + 1]
+    cols = np.flatnonzero(rows.any(axis=0))
+    if len(cols) == 0:
+        return None
+    width = cols[-1] - cols[0] + 1
+    band = rows[:, cols[0]:cols[-1] + 1]
+    filled = [np.flatnonzero(r) for r in band if r.any()]
+    height = len(filled)
+    if not (0.9 * space <= width <= 1.7 * space
+            and 0.55 * space <= height <= 1.3 * space
+            and width >= 0.95 * height):
+        return None
+    if float(band.mean()) < 0.6:
+        return None
+    # Anything beyond the head must be a thin stem stub, not a rest's tail.
+    rest = ink.copy()
+    rest[max(0, int(y - 0.7 * space)):int(y + 0.7 * space) + 1] = 0
+    extra_cols = np.flatnonzero(rest.any(axis=0))
+    if len(extra_cols) and extra_cols[-1] - extra_cols[0] + 1 > 0.35 * space:
+        return None
+    return float(x), float(y)

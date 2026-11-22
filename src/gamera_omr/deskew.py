@@ -1001,3 +1001,127 @@ def apply_shear(page: StackPage, plans: list[BandSkew], *,
                 continue
             out[src_lo - d:src_hi - d + 1, x] = arr[src_lo:src_hi + 1, x]
     return from_array(np.ascontiguousarray(out.astype(np.uint16)), page)
+
+
+def staff_tilt(arr: np.ndarray, staff: Staff,
+               strip_spaces: float = 6.0,
+               extent: tuple[float, float] | None = None
+               ) -> tuple[float, float] | None:
+    """Linear drift of a staff's lines: (offset at x=0, slope in px/px).
+
+    The staff finder reports one y per line; on a slightly rotated scan the
+    lines drift by a fraction of a space from one end of the system to the
+    other.  Each strip of a few staff spaces is matched against the five line
+    positions within half a space (so the comb cannot alias to the next line),
+    and a line is fitted through the strip offsets after dropping outliers.
+    """
+    h, w = arr.shape
+    space = max(1.0, staff.space)
+    ys = [int(round(y)) for y in staff.lines]
+    if len(ys) < 3:
+        return None
+    # Strips are tracked outward from the best-matching one, each within a
+    # few pixels of its neighbour, so a drift larger than half a space at the
+    # far end is followed instead of aliasing to the next line.
+    reach = max(2, int(1.2 * space))
+    track = max(2, int(round(0.3 * space)))
+    step = max(20, int(strip_spaces * space))
+    left, right = extent or (staff.left, staff.right)
+    x0 = max(0, int(left))
+    x1 = min(w, int(right))
+    lo = max(0, min(ys) - reach - 1)
+    hi = min(h, max(ys) + reach + 2)
+    strips = []
+    for a in range(x0, x1 - step // 2, step):
+        b = min(x1, a + step)
+        prof = arr[lo:hi, a:b].sum(axis=1).astype(float)
+        scores = []
+        for d in range(-reach, reach + 1):
+            total = 0.0
+            for y in ys:
+                r = y + d - lo
+                total += prof[max(0, r - 1):r + 2].max() if 0 <= r < len(prof) else 0.0
+            scores.append(total)
+        strips.append(((a + b) / 2.0, b - a, np.array(scores)))
+    if len(strips) < 4:
+        return None
+    anchor = max(range(len(strips)), key=lambda i: strips[i][2][reach])
+    chosen: dict[int, int] = {anchor: 0}
+    for order in (range(anchor + 1, len(strips)), range(anchor - 1, -1, -1)):
+        prev = 0
+        for i in order:
+            scores = strips[i][2]
+            lo_d, hi_d = max(-reach, prev - track), min(reach, prev + track)
+            window = scores[lo_d + reach:hi_d + reach + 1]
+            d = lo_d + int(np.argmax(window))
+            chosen[i] = d
+            prev = d
+    xs, offsets = [], []
+    for i, (cx, width, scores) in enumerate(strips):
+        d = chosen[i]
+        # A strip covered by a beam or text has no clear comb; skip it.
+        if scores[d + reach] < 0.6 * len(ys) * width:
+            continue
+        xs.append(cx)
+        offsets.append(d)
+    if len(xs) < 4:
+        return None
+    xs_a, off_a = np.array(xs), np.array(offsets, dtype=float)
+    keep = np.ones(len(xs_a), dtype=bool)
+    for _ in range(3):
+        coef = np.polyfit(xs_a[keep], off_a[keep], 1)
+        resid = np.abs(off_a - np.polyval(coef, xs_a))
+        new_keep = resid <= max(1.5, 2.5 * float(np.median(resid[keep])))
+        if new_keep.sum() < 4 or (new_keep == keep).all():
+            break
+        keep = new_keep
+    slope, intercept = np.polyfit(xs_a[keep], off_a[keep], 1)
+    return float(intercept), float(slope)
+
+
+def straighten_staves(page: StackPage, staves: list[Staff],
+                      min_drift: float = 0.2) -> StackPage | None:
+    """Undo a small rotation of a multi-staff system by vertical shear.
+
+    Used for grand staves, which the per-band deskew does not model: every
+    staff gets its own linear drift, and rows between two staves are shifted
+    by a linear blend of the two.  Returns None when no staff drifts by more
+    than `min_drift` staff spaces across its width.
+    """
+    arr = page.array()
+    h, w = arr.shape
+    fits = []
+    worst = 0.0
+    # The staves of a system share their extent; a drifting staff can make
+    # the finder cut one of them short, so measure each over the widest.
+    extent = (min(s.left for s in staves), max(s.right for s in staves))
+    for staff in staves:
+        fit = staff_tilt(arr, staff, extent=extent)
+        if fit is None:
+            continue
+        intercept, slope = fit
+        drift = abs(slope) * (extent[1] - extent[0]) / max(1.0, staff.space)
+        worst = max(worst, drift)
+        fits.append((staff.center, intercept, slope))
+    if not fits or worst < min_drift:
+        return None
+    fits.sort()
+    centers = np.array([c for c, _i, _s in fits])
+    xs = np.arange(w, dtype=float)
+    # Offsets are measured against the finder's line positions, so the
+    # corrected lines land on the reported y values.
+    per_staff = np.array([intercept + slope * xs
+                          for _c, intercept, slope in fits])
+    rows = np.arange(h, dtype=float)
+    if len(centers) == 1:
+        field_ = np.repeat(per_staff[:1], h, axis=0)
+    else:
+        idx = np.clip(np.searchsorted(centers, rows) - 1, 0, len(centers) - 2)
+        t = np.clip((rows - centers[idx]) / (centers[idx + 1] - centers[idx]),
+                    0.0, 1.0)[:, None]
+        field_ = (1 - t) * per_staff[idx] + t * per_staff[idx + 1]
+    map_x = np.repeat(xs[None, :], h, axis=0).astype(np.float32)
+    map_y = (rows[:, None] + field_).astype(np.float32)
+    out = cv2.remap(arr.astype(np.uint8), map_x, map_y, cv2.INTER_NEAREST,
+                    borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    return from_array(np.ascontiguousarray(out.astype(np.uint16)), page)
