@@ -139,12 +139,22 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
                  legacy: bool = False,
                  bar_length: Fraction = Fraction(4),
                  require_head: bool = False,
-                 recover_edges: bool = False) -> list[Event]:
+                 recover_edges: bool = False,
+                 clef_changes: list[tuple[float, str]] | None = None) -> list[Event]:
     from . import notes as notes_module  # local import avoids a cycle
 
     if templates is None:
         templates = notes_module.make_templates(glyphs, predictions)
     events = []
+
+    def clef_at(x: float) -> str:
+        chosen = clef
+        for change_x, changed in clef_changes or ():
+            if x >= change_x:
+                chosen = changed
+            else:
+                break
+        return chosen
 
     def measure_of(x: float) -> int | None:
         if not bounds:
@@ -206,9 +216,9 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
                 continue
             for hx, hy, duration in heads:
                 head_y = g.y0 + hy
-                position = staff_position(staff, head_y)
-                pitch = pitch_at(staff, clef, position, fifths)
                 x = g.x0 + hx
+                position = staff_position(staff, head_y)
+                pitch = pitch_at(staff, clef_at(x), position, fifths)
                 measure = measure_of(x)
                 if measure is not None:
                     events.append(Event(measure, x, pitch, duration, "note", g,
@@ -229,7 +239,7 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
                     duration = Fraction(1) if fill >= 0.75 else Fraction(2)
                     head_y = g.y0 + cy
                     position = staff_position(staff, head_y)
-                    pitch = pitch_at(staff, clef, position, fifths)
+                    pitch = pitch_at(staff, clef_at(g.cx), position, fifths)
                     measure = measure_of(g.cx)
                     if measure is not None:
                         events.append(Event(measure, g.cx, pitch, duration,
@@ -246,7 +256,7 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
                 # is kept (the slur/text recovery handles those separately).
                 continue
         position = staff_position(staff, head_y)
-        pitch = pitch_at(staff, clef, position, fifths)
+        pitch = pitch_at(staff, clef_at(g.cx), position, fifths)
         measure = measure_of(g.cx)
         if measure is None:
             continue

@@ -60,12 +60,55 @@ def _gamera_version() -> str:
         return f"unavailable ({exc})"
 
 
-def _decode_piano(staves, items, predictions, dots, fifths, bar, arr):
+def _detect_piano_clefs(comps, staff, starts, initial):
+    """Find clef glyphs at system/measure starts and whether they are F4.
+
+    A clef is a glyph roughly 2.2-4.2 staff spaces tall and 0.8-2.2 wide.
+    A bass clef is recognised by its two dots to the right; otherwise the
+    clef is treble (G2).  Returns (x, clef) changes from `initial`.
+    """
+    space = staff.space
+    changes = []
+    current = initial
+    for x0 in starts:
+        candidates = [
+            c for c in comps
+            if (x0 - 0.5 * space <= c.cx <= x0 + 5.5 * space
+                and staff.top - 0.5 * space <= c.cy <= staff.bottom + 0.5 * space
+                and 2.2 * space <= c.h <= 4.2 * space
+                and 0.8 * space <= c.w <= 2.2 * space
+                and c.area >= 0.25 * c.w * c.h)
+        ]
+        if not candidates:
+            continue
+        clef = min(candidates, key=lambda c: abs(c.cx - x0))
+        dots = [
+            d for d in comps
+            if (clef.cx + 0.2 * space <= d.cx <= clef.cx + 3.0 * space
+                and staff.top - 0.6 * space <= d.cy <= staff.bottom + 0.6 * space
+                and 6 <= d.area <= 140
+                and 2 <= d.w <= 0.45 * space and 2 <= d.h <= 0.75 * space
+                and d.solidity >= 0.45)
+        ]
+        bass = any(
+            0.2 * space <= abs(a.cy - b.cy) <= 1.5 * space
+            and abs(a.cx - b.cx) <= 0.8 * space
+            for i, a in enumerate(dots) for b in dots[i + 1:]
+        )
+        detected = "F4" if bass else "G2"
+        if detected != current:
+            changes.append((clef.cx, detected))
+            current = detected
+    return changes
+
+
+def _decode_piano(staves, items, predictions, dots, fifths, bar, arr, cleaned):
     """Decode a grand-staff system into right/left-hand event streams.
 
     The two staves share measure boundaries; each staff gets its own clef.
     """
     rh, lh, bounds_all = [], [], []
+    comps = segments.components(cleaned.image)
     offset = 0
     pairs = [(staves[i], staves[i + 1] if i + 1 < len(staves) else None)
              for i in range(0, len(staves), 2)]
@@ -83,13 +126,19 @@ def _decode_piano(staves, items, predictions, dots, fifths, bar, arr):
                 lower, segments.find_barlines(arr, lower))
             if len(alt) > len(bounds):
                 bounds = alt
-        for staff, clef, target in ((upper, "G2", rh), (lower, "F4", lh)):
+        starts = [upper.left] + [a for a, _b in bounds[1:]]
+        upper_changes = _detect_piano_clefs(comps, upper, starts, "G2")
+        lower_changes = (_detect_piano_clefs(comps, lower, starts, "F4")
+                         if lower is not None else [])
+        for staff, clef, changes, target in (
+                (upper, "G2", upper_changes, rh),
+                (lower, "F4", lower_changes, lh)):
             if staff is None:
                 continue
             ev = decode.decode_staff(
                 staff, items, predictions, bounds, clef, fifths, dots=dots,
                 legacy=True, bar_length=bar, require_head=False,
-                recover_edges=False)
+                recover_edges=False, clef_changes=changes)
             for event in ev:
                 event.measure += offset
             target.extend(ev)
@@ -244,7 +293,7 @@ def cmd_read(args) -> int:
     bar = Fraction(meter.TimeSignature(time_signature).barDuration.quarterLength)
     if piano:
         rh, lh, bounds_all, offset = _decode_piano(
-            staves, items, predictions, dots, fifths, bar, arr)
+            staves, items, predictions, dots, fifths, bar, arr, cleaned)
         space = sum(s.space for s in staves) / max(1, len(staves))
         for part in (rh, lh):
             part[:] = decode.normalize_measures(part, offset, bar)
@@ -335,7 +384,7 @@ def cmd_report(args) -> int:
 
     if piano:
         rh, lh, bounds_all, offset = _decode_piano(
-            staves, items, predictions, [], fifths, bar, arr)
+            staves, items, predictions, [], fifths, bar, arr, cleaned)
         space = sum(s.space for s in staves) / max(1, len(staves))
         for part in (rh, lh):
             part[:] = decode.normalize_measures(part, offset, bar)
