@@ -260,6 +260,30 @@ def _distance_heads(ink: np.ndarray, space: float) -> list[tuple[float, float]]:
     return heads
 
 
+def stem_direction(ink: np.ndarray, space: float) -> str | None:
+    """Stem direction of a note, chord or beamed group.
+
+    Stems, beams and flags all sit on one side of the noteheads, so the ink
+    outside the head band tells the direction without tracing each stem.  A
+    whole note (nothing outside the heads) returns None.  This is what
+    separates two independent voices sharing a staff.
+    """
+    heads = _distance_heads(ink, space)
+    if not heads:
+        return None
+    ys = [y for _x, y in heads]
+    top, bottom = min(ys), max(ys)
+    # Leave the heads themselves (and their outline) out of the comparison.
+    margin = max(1, int(round(0.3 * space)))
+    above = int(ink[:max(0, int(top) - margin)].sum())
+    below = int(ink[min(ink.shape[0], int(bottom) + margin + 1):].sum())
+    if above > 1.4 * below + 3:
+        return "up"
+    if below > 1.4 * above + 3:
+        return "down"
+    return None
+
+
 def split_beam_group(ink: np.ndarray, space: float, templates=None):
     """Split a beamed group into (head_x, head_y, duration) per notehead."""
     h, w = ink.shape

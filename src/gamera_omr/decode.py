@@ -36,6 +36,8 @@ class Event:
     onset: Fraction = Fraction(0)
     flexible: bool = False   # beamed note; duration may be fitted to the meter
     hy: float = 0.0          # absolute y of the notehead
+    direction: str | None = None  # stem direction ("up"/"down") when read
+    voice: int = 0           # 0 = upper/main voice, 1 = lower second voice
 
     @property
     def midi(self) -> int:
@@ -140,7 +142,8 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
                  bar_length: Fraction = Fraction(4),
                  require_head: bool = False,
                  recover_edges: bool = False,
-                 clef_changes: list[tuple[float, str]] | None = None) -> list[Event]:
+                 clef_changes: list[tuple[float, str]] | None = None,
+                 voices: bool = False) -> list[Event]:
     from . import notes as notes_module  # local import avoids a cycle
 
     if templates is None:
@@ -214,6 +217,8 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
             # false positive in the NBA/Rösler/Sibley prints.
             if not heads or (wide_note and len(heads) < 2):
                 continue
+            direction = (notes_module.stem_direction(g.ink, g.space)
+                         if voices else None)
             for hx, hy, duration in heads:
                 head_y = g.y0 + hy
                 x = g.x0 + hx
@@ -222,7 +227,8 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
                 measure = measure_of(x)
                 if measure is not None:
                     events.append(Event(measure, x, pitch, duration, "note", g,
-                                        flexible=True, hy=head_y))
+                                        flexible=True, hy=head_y,
+                                        direction=direction))
             continue
         duration = duration_for(label, g.ink, g.space, legacy=legacy)
         if duration is None:
@@ -243,7 +249,9 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
                     measure = measure_of(g.cx)
                     if measure is not None:
                         events.append(Event(measure, g.cx, pitch, duration,
-                                            "note", g, hy=head_y))
+                                            "note", g, hy=head_y,
+                                            direction=(notes_module.stem_direction(
+                                                g.ink, g.space) if voices else None)))
             continue
         head_y = g.y0 + head_center(g.ink, g.space)
         # A rest or ornament misclassified as a note has no notehead that
@@ -260,11 +268,70 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
         measure = measure_of(g.cx)
         if measure is None:
             continue
-        events.append(Event(measure, g.cx, pitch, duration, "note", g, hy=head_y))
+        direction = (notes_module.stem_direction(g.ink, g.space)
+                     if voices else None)
+        events.append(Event(measure, g.cx, pitch, duration, "note", g,
+                            hy=head_y, direction=direction))
     events.sort(key=lambda e: (e.measure, e.x))
     if dots:
         apply_dots(events, dots, staff.space)
     return events
+
+
+def split_staff_voices(events: list[Event], space: float,
+                       chord_tol: float = 0.9,
+                       min_pairs: int = 1) -> list[list[Event]] | None:
+    """Split one staff's events into independent musical voices.
+
+    Stem direction separates the voices, but only when notes of opposite
+    direction actually sound together: a single homophonic line also flips
+    stem direction with the note's position on the staff, and must stay one
+    voice.  Returns two event lists (the main voice first, the one with more
+    notes) or None for a single voice.  The `voice` field of every event is
+    set either way.
+    """
+    notes = [e for e in events if e.kind == "note"]
+    up = [e for e in notes if e.direction == "up"]
+    down = [e for e in notes if e.direction == "down"]
+    if not up or not down:
+        return None
+    tolerance = chord_tol * space
+    overlapping = sum(
+        1 for d in down
+        if any(abs(d.x - u.x) <= tolerance and d.measure == u.measure
+               for u in up)
+    )
+    if overlapping < min_pairs:
+        return None
+
+    known = up + down
+    for event in events:
+        if event.kind == "note" and event.direction in ("up", "down"):
+            event.voice = 0 if event.direction == "up" else 1
+        elif event.kind == "note":
+            # A head cut by staff removal has no stem left; give it to the
+            # voice whose notes are closest in the staff.
+            nearest = min(
+                known,
+                key=lambda n: (n.x - event.x) ** 2
+                + (0.5 * (n.hy - event.hy)) ** 2,
+            )
+            event.voice = 0 if nearest.direction == "up" else 1
+        else:
+            event.voice = 0
+    voices = ([e for e in events if e.voice == 0],
+              [e for e in events if e.voice == 1])
+    if not voices[0] or not voices[1]:
+        for event in events:
+            event.voice = 0
+        return None
+    if len(up) < len(down):
+        # The main voice is the larger group; number it first so the melody
+        # stays voice 1 even when its stems point down.
+        for event in events:
+            event.voice = 1 - event.voice
+        voices = (voices[1], voices[0])
+    return list(voices)
 
 
 def apply_dots(events: list[Event], dots: list[tuple[float, float]], space: float):
@@ -453,7 +520,21 @@ def assign_onsets(events: list[Event], nmeasures: int, bar_length: Fraction):
 
 
 def measure_fill(events: list[Event], nmeasures: int, bar_length: Fraction):
-    sums = [Fraction(0) for _ in range(nmeasures)]
+    """Sounding length per measure: the longest voice, chords counted once.
+
+    Chord members share an onset within one voice and must not be added
+    together, and a second voice sounds alongside the first rather than after
+    it, so the measure's fill is the maximum over its voices.
+    """
+    grouped: dict[tuple[int, int, Fraction], Fraction] = {}
     for e in events:
-        sums[e.measure] += e.duration
+        key = (e.measure, e.voice, e.onset)
+        grouped[key] = max(grouped.get(key, Fraction(0)), e.duration)
+    voices: dict[tuple[int, int], Fraction] = {}
+    for (measure, voice, _onset), duration in grouped.items():
+        voices[(measure, voice)] = voices.get((measure, voice), Fraction(0)) + duration
+    sums = [Fraction(0) for _ in range(nmeasures)]
+    for (measure, _voice), duration in voices.items():
+        if 0 <= measure < nmeasures:
+            sums[measure] = max(sums[measure], duration)
     return sums
