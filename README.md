@@ -141,6 +141,10 @@ read with `--source piano`:
   detection and pitch.
 - Simultaneous heads within `0.6*space` share an onset and duration, and the
   MusicXML writer emits them as chords.
+- **Clef changes are followed.**  At each measure start the engine looks for a
+  clef-sized glyph; a bass clef is recognised by its two dots, otherwise the
+  clef is treble.  Pitches after the change use the new clef (p-001-s0 changes
+  the lower staff from F4 to G2 before its last measure).
 
 Current status: `p-001-s0` now has the correct 5 measures (the grand-staff
 barline test removed long stems mistaken for bars), 60 note events (39
