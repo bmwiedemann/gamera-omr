@@ -37,7 +37,9 @@ class StackPage:
         init_gamera()
         if self.image.data.pixel_type == 0:  # already ONEBIT
             return self.image
-        return self.image.otsu_threshold(0)
+        # to_onebit converts RGB/GREY16/etc. through greyscale before Otsu;
+        # calling otsu_threshold directly fails on RGB piano crops.
+        return self.image.to_onebit()
 
     def array(self):
         """Numpy view of the binary image (uint16, 0/1)."""
