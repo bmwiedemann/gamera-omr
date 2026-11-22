@@ -39,3 +39,14 @@ def test_onsets_and_gaps_from_x():
     assert sum(e.duration for e in out) == Fraction(4)
     assert any(r.onset == Fraction(1) and r.duration == Fraction(2)
                for r in rests)
+
+
+def test_chord_notes_share_onset_and_duration():
+    a = decode.Event(0, 10.0, None, Fraction(1), "note")
+    b = decode.Event(0, 11.0, None, Fraction(1), "note")
+    out = decode.assign_onsets_from_x(
+        [a, b], [(0.0, 100.0)], Fraction(4), chord_tol=2.0)
+    notes = [e for e in out if e.kind == "note"]
+    assert len(notes) == 2
+    assert notes[0].onset == notes[1].onset
+    assert notes[0].duration == notes[1].duration

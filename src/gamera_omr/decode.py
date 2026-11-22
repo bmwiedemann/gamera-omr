@@ -272,7 +272,8 @@ def apply_dots(events: list[Event], dots: list[tuple[float, float]], space: floa
 def assign_onsets_from_x(events: list[Event], bounds: list[tuple[float, float]],
                          bar_length: Fraction,
                          grid: Fraction = Fraction(1, 4),
-                         anchor: bool = True) -> list[Event]:
+                         anchor: bool = True,
+                         chord_tol: float = 0.0) -> list[Event]:
     """Place notes by their printed x position, fill the gaps with rests.
 
     The horizontal position of a notehead is a reliable rhythm cue even when
@@ -292,6 +293,20 @@ def assign_onsets_from_x(events: list[Event], bounds: list[tuple[float, float]],
         notes = sorted((e for e in items if e.kind == "note"),
                        key=lambda e: e.x)
         rests = [e for e in items if e.kind == "rest"]
+        if chord_tol > 0 and notes:
+            # Simultaneous heads form one chord and share its duration.
+            groups: list[list[Event]] = [[notes[0]]]
+            for e in notes[1:]:
+                if abs(e.x - groups[-1][-1].x) <= chord_tol:
+                    groups[-1].append(e)
+                else:
+                    groups.append([e])
+            for group in groups:
+                durations = [e.duration for e in group if e.duration]
+                if durations:
+                    value = max(durations)
+                    for e in group:
+                        e.duration = value
         if not notes:
             out.append(rests[0] if rests
                        else Event(measure, x0, None, bar_length, "rest"))
@@ -324,26 +339,44 @@ def assign_onsets_from_x(events: list[Event], bounds: list[tuple[float, float]],
                 onsets.append(min(max(Fraction(round(raw / grid)) * grid,
                                       Fraction(0)), limit))
         for i in range(1, len(onsets)):
-            if onsets[i] <= onsets[i - 1]:
+            same_chord = (chord_tol > 0
+                          and abs(notes[i].x - notes[i - 1].x) <= chord_tol)
+            if same_chord:
+                onsets[i] = onsets[i - 1]
+            elif onsets[i] <= onsets[i - 1]:
                 onsets[i] = min(onsets[i - 1] + grid, limit)
         if onsets[0] > 0:
             rest = Event(measure, x0, None, onsets[0], "rest")
             rest.onset = Fraction(0)
             out.append(rest)
-        for i, event in enumerate(notes):
-            event.onset = onsets[i]
-            gap = (onsets[i + 1] if i + 1 < len(notes) else bar_length) - onsets[i]
-            if event.duration is None or event.duration <= 0:
-                event.duration = gap
-            if event.duration > gap:
-                event.duration = gap
-            if event.duration <= 0:
-                event.duration = grid
-            out.append(event)
-            if gap > event.duration:
-                rest = Event(measure, event.x + 1.0, None,
-                             gap - event.duration, "rest")
-                rest.onset = event.onset + event.duration
+        # Emit one onset group at a time so simultaneous heads become a chord
+        # with one shared duration and one gap rest.
+        groups: list[list[int]] = []
+        for i, onset in enumerate(onsets):
+            if groups and onset == onsets[groups[-1][0]]:
+                groups[-1].append(i)
+            else:
+                groups.append([i])
+        for gi, idxs in enumerate(groups):
+            onset = onsets[idxs[0]]
+            next_onset = (onsets[groups[gi + 1][0]]
+                          if gi + 1 < len(groups) else bar_length)
+            gap = next_onset - onset
+            durations = [notes[i].duration for i in idxs
+                         if notes[i].duration and notes[i].duration > 0]
+            duration = max(durations) if durations else gap
+            if duration > gap:
+                duration = gap
+            if duration <= 0:
+                duration = grid
+            for i in idxs:
+                notes[i].onset = onset
+                notes[i].duration = duration
+                out.append(notes[i])
+            if gap > duration:
+                rest = Event(measure, notes[idxs[0]].x + 1.0, None,
+                             gap - duration, "rest")
+                rest.onset = onset + duration
                 out.append(rest)
     return out
 
