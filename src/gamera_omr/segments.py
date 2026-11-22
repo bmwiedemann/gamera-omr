@@ -77,7 +77,10 @@ def filter_components(comps: list[Component], staff: Staff):
         if c.h < 0.75 * staff.space and c.w < 1.5 * staff.space:
             dropped["text"] += 1
             continue
-        if c.h > 10 * staff.space:
+        # A very tall, narrow component is a barline fragment or a column of
+        # text.  A tall *wide* one can be a piano beamed group spanning the
+        # whole staff and must not be discarded.
+        if c.h > 10 * staff.space and c.w < 2.0 * staff.space:
             dropped["text"] += 1
             continue
         # a staff-line remnant is a long, very thin horizontal stroke
