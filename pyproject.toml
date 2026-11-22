@@ -9,7 +9,8 @@ description = "Optical music recognition engine built on Gamera (BWV 248)"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "GPL-2.0-or-later"}
-dependencies = ["numpy", "music21", "Pillow", "lxml", "PyYAML"]
+dependencies = ["numpy", "music21", "Pillow", "lxml", "PyYAML",
+                "opencv-python-headless"]
 
 [project.scripts]
 gamera-omr = "gamera_omr.cli:main"

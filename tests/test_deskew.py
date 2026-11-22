@@ -3,9 +3,11 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 
-from gamera_omr import deskew
-from gamera_omr.stacks import StackPage, from_array
+from gamera_omr import config, deskew
+from gamera_omr.stacks import StackPage, from_array, load_stack
+from gamera_omr.staffs import Staff, find_staves, validate_staves
 
 
 def synthetic_page(slopes=(0.0087, -0.0052, 0.0), space=14,
@@ -167,3 +169,82 @@ def test_bowed_band_selects_quadratic_and_flattens():
         b = line_y(fixed, right, y + k * 14, 14)
         assert a is not None and b is not None
         assert abs(a - b) <= 1.5
+
+
+def test_deskew_page_with_staff_hints():
+    slopes = (0.0087, -0.0052, 0.0)
+    bows = (0.0, 4.0, 0.0)
+    page, _arr, centers = synthetic_page(slopes=slopes, bows=bows)
+    staves = [Staff(i, [float(y + k * 14) for k in range(5)], 40, 1160, 14, 2)
+              for i, y in enumerate(centers)]
+    result = deskew.deskew_page(page, initial_staves=staves,
+                                initial_diag={"backend": "synthetic"})
+    assert result.applied
+    assert result.staves is not None and len(result.staves) == 3
+    assert "quadratic" in [b["model"] for b in result.diagnostics["bands"]]
+    assert result.diagnostics["aggregate"]["applied_bands"] == 2
+    assert result.diagnostics["post"]["staves"] == 3
+
+
+def test_deskew_page_without_staff_hints():
+    page, _arr, _centers = synthetic_page(bows=(0.0, 4.0, 0.0))
+    result = deskew.deskew_page(page)
+    assert result.applied
+    assert result.staves is not None and len(result.staves) == 3
+    assert result.diagnostics["reason"] is None
+
+
+def test_flat_page_is_a_noop():
+    page, arr, _centers = synthetic_page(slopes=(0.0, 0.0, 0.0),
+                                        bows=(0.0, 0.0, 0.0))
+    result = deskew.deskew_page(page)
+    assert not result.applied
+    assert result.diagnostics["reason"] == "below_threshold"
+    assert np.array_equal(result.page.array(), arr)
+
+
+SIBLEY1 = config.WORK / "stacks" / "sibley" / "S-01.png"
+SIBLEY2 = config.WORK / "stacks" / "sibley" / "S-02.png"
+ROSLER1 = config.WORK / "stacks" / "rosler" / "S-01.png"
+CHORALE = config.WORK / "mvt" / "5" / "stacks" / "nba" / "S-01.png"
+
+
+def _needs(path):
+    return pytest.mark.skipif(not path.exists(), reason=f"missing test image {path}")
+
+
+@_needs(SIBLEY1)
+def test_prepare_page_corrects_large_skew():
+    page, staves, diag = deskew.prepare_page(SIBLEY1)
+    assert diag["deskew"]["applied"]
+    assert len(staves) == 6
+    assert diag["deskew"]["aggregate"]["max_edge_spaces"] > 0.5
+    ok, reasons = validate_staves(staves, page.image)
+    assert ok, reasons
+
+
+@_needs(SIBLEY2)
+def test_prepare_page_bootstraps_when_raw_finder_fails():
+    page, staves, diag = deskew.prepare_page(SIBLEY2)
+    assert diag["deskew"]["applied"]
+    assert len(staves) == 6
+    assert diag["oracle_frame"] == "unavailable"
+
+
+@_needs(ROSLER1)
+def test_prepare_page_keeps_rosler_geometry():
+    page, staves, diag = deskew.prepare_page(ROSLER1)
+    assert diag["deskew"]["applied"]
+    assert len(staves) == 6
+    ok, reasons = validate_staves(staves, page.image)
+    assert ok, reasons
+
+
+@_needs(CHORALE)
+def test_prepare_page_preserves_oracle_mae_for_nba():
+    raw = load_stack(CHORALE)
+    _raw_staves, raw_diag = find_staves(raw)
+    _page, staves, diag = deskew.prepare_page(CHORALE)
+    assert len(staves) == 3
+    assert diag["oracle_frame"] == "pre_deskew"
+    assert diag["oracle_mae"] == raw_diag["oracle_mae"]

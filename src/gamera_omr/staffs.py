@@ -230,16 +230,19 @@ def refine_extent(page: StackPage, staff: Staff, min_coverage: int = 4) -> Staff
 
     The finder occasionally extrapolates a staff through instrument names or
     other text to the left of the real staff; this keeps components of that
-    text out of the note stream.
+    text out of the note stream.  The row window follows the staff space so a
+    small residual skew/rounding error after deskewing does not truncate the
+    extent.
     """
     arr = page.array()
     ys = [int(round(y)) for y in staff.lines]
     h, w = arr.shape
+    tolerance = max(1, int(round(0.15 * staff.space)))
     good = np.zeros(w, dtype=bool)
     for x in range(w):
         count = 0
         for y in ys:
-            if 0 <= y < h and arr[max(0, y - 1):y + 2, x].any():
+            if 0 <= y < h and arr[max(0, y - tolerance):y + tolerance + 1, x].any():
                 count += 1
         good[x] = count >= min_coverage
     idx = np.flatnonzero(good)
@@ -250,7 +253,9 @@ def refine_extent(page: StackPage, staff: Staff, min_coverage: int = 4) -> Staff
     ends = np.r_[idx[breaks], idx[-1]]
     k = int(np.argmax(ends - starts))
     start, end = int(starts[k]), int(ends[k])
-    if end - start >= 0.5 * (staff.right - staff.left):
+    # Only adopt the refined extent when it is still wide enough to validate;
+    # on a coarsely corrected page a residual bow can otherwise truncate it.
+    if end - start >= 0.58 * arr.shape[1]:
         staff.left, staff.right = float(start), float(end)
     return staff
 

@@ -15,12 +15,13 @@ resampling.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import cv2
 import numpy as np
 
-from .stacks import StackPage, from_array
-from .staffs import Staff
+from .stacks import StackPage, from_array, load_stack
+from .staffs import Staff, StaffFindError, find_staves
 
 
 @dataclass(frozen=True)
@@ -549,6 +550,315 @@ def fit_band_skew(
     )
     plan.shifts = _shifts_for(plan, arr.shape[1])
     return _finalize(plan, options)
+
+
+@dataclass
+class DeskewResult:
+    page: StackPage
+    staves: list[Staff] | None
+    applied: bool
+    bands: list[BandSkew]
+    diagnostics: dict
+    staff_diag: dict = field(default_factory=dict)
+
+
+def _band_diag(plan: BandSkew) -> dict:
+    shifts = plan.shifts[plan.band.x0:plan.band.x1 + 1]
+    return {
+        "index": plan.band.index,
+        "rows": [plan.band.y0, plan.band.y1],
+        "x": [plan.band.x0, plan.band.x1],
+        "space": round(plan.space, 1),
+        "angle_deg": round(plan.angle_deg, 3),
+        "slope": round(plan.slope, 6),
+        "quadratic": plan.quadratic,
+        "model": plan.model,
+        "edge_deviation_px": round(plan.edge_deviation_px, 2),
+        "edge_deviation_spaces": round(plan.edge_deviation_spaces, 2),
+        "curvature_px": round(plan.curvature_px, 2),
+        "residual_rms_px": (round(plan.residual_rms_px, 2)
+                            if plan.residual_rms_px is not None else None),
+        "shift_min_px": int(shifts.min()) if shifts.size else 0,
+        "shift_max_px": int(shifts.max()) if shifts.size else 0,
+        "line_slope_spread_deg": round(plan.line_slope_spread_deg, 3),
+        "applied": plan.applied,
+        "reason": plan.reason,
+    }
+
+
+def _aggregate(plans: list[BandSkew]) -> dict:
+    applied = [p for p in plans if p.applied]
+    residuals = [p.residual_rms_px for p in applied
+                 if p.residual_rms_px is not None]
+    reasons: dict[str, int] = {}
+    for plan in plans:
+        if not plan.applied and plan.reason:
+            reasons[plan.reason] = reasons.get(plan.reason, 0) + 1
+    return {
+        "bands": len(plans),
+        "applied_bands": len(applied),
+        "max_angle_deg": (round(max(abs(p.angle_deg) for p in applied), 3)
+                          if applied else 0.0),
+        "max_edge_spaces": (round(max(p.edge_deviation_spaces for p in applied), 2)
+                            if applied else 0.0),
+        "max_curvature_px": (round(max(p.curvature_px for p in applied), 2)
+                             if applied else 0.0),
+        "max_residual_rms_px": (round(max(residuals), 2) if residuals else None),
+        "reasons": reasons,
+    }
+
+
+def _summary(staves: list[Staff] | None, diag: dict | None,
+             error: str | None = None) -> dict:
+    if staves is None:
+        return {"found": False, "staves": 0, "backend": None,
+                "valid": False, "error": error}
+    return {"found": True, "staves": len(staves),
+            "backend": (diag or {}).get("backend"), "valid": True}
+
+
+def _deskew_diag(plans: list[BandSkew], *, applied: bool, reason: str | None,
+                 pre: dict, post: dict, passes: int = 1) -> dict:
+    return {
+        "enabled": True,
+        "applied": applied,
+        "reason": reason,
+        "passes": passes,
+        "pre": pre,
+        "post": post,
+        "aggregate": _aggregate(plans),
+        "bands": [_band_diag(p) for p in plans],
+    }
+
+
+def _post_quality(arr: np.ndarray, staves: list[Staff],
+                  options: DeskewOptions) -> list[BandSkew | None]:
+    bands = find_system_bands(arr, staves=staves, options=options)
+    plans: list[BandSkew | None] = []
+    for band, staff in zip(bands, staves):
+        plans.append(fit_band_skew(arr, band, staff=staff, options=options))
+    return plans
+
+
+def _quality(plans: list[BandSkew | None], indices: set[int]) -> tuple[float, float | None]:
+    edges = []
+    residuals = []
+    for plan in plans:
+        if plan is None or plan.band.index not in indices:
+            continue
+        edges.append(plan.edge_deviation_px)
+        if plan.residual_rms_px is not None:
+            residuals.append(plan.residual_rms_px)
+    if len(edges) != len(indices):
+        return float("inf"), None
+    return max(edges), (max(residuals) if residuals else None)
+
+
+def _accepted(plans: list[BandSkew], post: list[BandSkew | None]) -> bool:
+    applied = {p.band.index for p in plans if p.applied}
+    if not applied:
+        return False
+    pre_edge, pre_res = _quality(plans, applied)
+    post_edge, post_res = _quality(post, applied)
+    edge_ok = post_edge <= max(1.0, 0.9 * pre_edge)
+    res_ok = (pre_res is not None and post_res is not None
+              and post_res <= max(1.0, 0.85 * pre_res))
+    return edge_ok or res_ok
+
+
+def _rejected(page: StackPage, staves: list[Staff] | None,
+              plans: list[BandSkew], reason: str, pre: dict,
+              post: dict | None = None, passes: int = 1) -> DeskewResult:
+    return DeskewResult(page, staves, False, plans,
+                        _deskew_diag(plans, applied=False, reason=reason,
+                                     pre=pre, post=post or {}, passes=passes))
+
+
+def deskew_page(
+    page: StackPage,
+    *,
+    backend: str = "auto",
+    initial_staves: list[Staff] | None = None,
+    initial_diag: dict | None = None,
+    options: DeskewOptions = DeskewOptions(),
+) -> DeskewResult:
+    """Estimate per-system shear, apply it, and validate the result.
+
+    With staff hints, correction is accepted only when the corrected page
+    still yields the same number of validated staves and the fitted residual
+    or edge deviation improves.  Without hints (the raw finder failed), a
+    coarse per-band projection shear is used to bootstrap staff finding.
+    """
+    arr = page.array()
+    if initial_staves:
+        pre = _summary(initial_staves, initial_diag)
+        bands = find_system_bands(arr, staves=initial_staves, options=options)
+        plans = [fit_band_skew(arr, band, staff=staff, options=options)
+                 for band, staff in zip(bands, initial_staves)]
+        plans = [p for p in plans if p is not None]
+        if not plans:
+            return _rejected(page, initial_staves, [], "no_fit", pre)
+        if not any(p.applied for p in plans):
+            return _rejected(page, initial_staves, plans, "below_threshold", pre)
+        try:
+            candidate = apply_shear(page, plans)
+        except ValueError:
+            return _rejected(page, initial_staves, plans, "bands_overlap", pre)
+        try:
+            post_staves, post_diag = find_staves(candidate, backend,
+                                                 allow_oracle=False)
+        except StaffFindError as exc:
+            return _rejected(page, initial_staves, plans,
+                             "staff_finding_failed_after_deskew", pre,
+                             {"error": str(exc)})
+        post = _summary(post_staves, post_diag)
+        if len(post_staves) != len(initial_staves):
+            return _rejected(page, initial_staves, plans, "staff_count_changed",
+                             pre, post)
+        post_plans = _post_quality(candidate.array(), post_staves, options)
+        if not _accepted(plans, post_plans):
+            return _rejected(page, initial_staves, plans, "post_quality_regressed",
+                             pre, post)
+        return DeskewResult(candidate, post_staves, True, plans,
+                            _deskew_diag(plans, applied=True, reason=None,
+                                         pre=pre, post=post),
+                            post_diag)
+
+    return _deskew_without_staves(page, backend, options)
+
+
+def _deskew_without_staves(page: StackPage, backend: str,
+                           options: DeskewOptions) -> DeskewResult:
+    """Bootstrap staff finding: fit each band without staff hints, then shear.
+
+    The robust strip fit does not actually need staff hints (the comb of five
+    lines provides the line identities), so it can correct bowed systems that
+    a linear projection angle alone cannot.  The coarse projection plan is
+    only used when the trajectory fit is unavailable.
+    """
+    arr = page.array()
+    pre = {"found": False, "staves": 0, "backend": None, "valid": False}
+    bands = find_system_bands(arr, options=options)
+    precise = [fit_band_skew(arr, band, options=options) for band in bands]
+    precise = [p for p in precise if p is not None]
+    fitted = [p for p in precise if p.model != "projection"]
+    # The hint-free comb fit is reliable for moderately skewed systems; a
+    # majority of projection-only bands means it could not identify the five
+    # lines, so bootstrap staff finding with the coarse shear instead.
+    if fitted and 2 * len(fitted) >= len(precise) and any(p.applied for p in fitted):
+        try:
+            candidate = apply_shear(page, fitted)
+        except ValueError:
+            candidate = None
+        if candidate is not None:
+            try:
+                staves, staff_diag = find_staves(candidate, backend,
+                                                 allow_oracle=False)
+            except StaffFindError:
+                staves = None
+            if staves is not None:
+                post = _summary(staves, staff_diag)
+                return DeskewResult(
+                    candidate, staves, True, fitted,
+                    _deskew_diag(fitted, applied=True, reason=None,
+                                 pre=pre, post=post, passes=1),
+                    staff_diag)
+
+    coarse = [coarse_band_skew(arr, band, options=options) for band in bands]
+    coarse = [p for p in coarse if p is not None]
+    if not any(p.applied for p in coarse):
+        return _rejected(page, None, precise or coarse, "below_threshold", pre)
+    try:
+        coarse_page = apply_shear(page, coarse)
+    except ValueError:
+        return _rejected(page, None, precise or coarse, "bands_overlap", pre)
+    try:
+        coarse_staves, coarse_diag = find_staves(coarse_page, backend,
+                                                 allow_oracle=False)
+    except StaffFindError as exc:
+        plans = precise or coarse
+        return _rejected(page, None, plans, "staff_finding_failed_after_deskew",
+                         pre, {"error": str(exc)})
+
+    # Refit precise trajectories on the original page, using the coarse
+    # staves for line identities.  At x_ref the coarse shear is zero, so the
+    # staff line positions are still valid for band/prediction.
+    orig_bands = find_system_bands(arr, staves=coarse_staves, options=options)
+    refined: list[BandSkew] = []
+    for band, staff in zip(orig_bands, coarse_staves):
+        plan = fit_band_skew(arr, band, staff=staff, options=options)
+        if plan is not None:
+            refined.append(plan)
+    if any(p.applied for p in refined):
+        try:
+            refined_page = apply_shear(page, refined)
+        except ValueError:
+            refined_page = None
+        if refined_page is not None:
+            try:
+                refined_staves, refined_diag = find_staves(
+                    refined_page, backend, allow_oracle=False)
+            except StaffFindError:
+                refined_staves = None
+            if (refined_staves is not None
+                    and len(refined_staves) == len(coarse_staves)):
+                post = _summary(refined_staves, refined_diag)
+                return DeskewResult(
+                    refined_page, refined_staves, True, refined,
+                    _deskew_diag(refined, applied=True, reason=None,
+                                 pre=pre, post=post, passes=2),
+                    refined_diag)
+
+    post = _summary(coarse_staves, coarse_diag)
+    return DeskewResult(
+        coarse_page, coarse_staves, True, coarse,
+        _deskew_diag(coarse, applied=True, reason=None, pre=pre,
+                     post=post, passes=1),
+        coarse_diag)
+
+
+def prepare_page(
+    page_or_path,
+    *,
+    backend: str = "auto",
+    enabled: bool = True,
+    options: DeskewOptions = DeskewOptions(),
+) -> tuple[StackPage, list[Staff], dict]:
+    """Load, deskew and staff-find a page; return merged diagnostics."""
+    page = (load_stack(page_or_path)
+            if isinstance(page_or_path, (str, Path)) else page_or_path)
+    if not enabled:
+        staves, diag = find_staves(page, backend)
+        diag["deskew"] = {
+            "enabled": False, "applied": False, "reason": "disabled",
+            "passes": 0, "pre": {}, "post": {}, "aggregate": {}, "bands": [],
+        }
+        return page, staves, diag
+
+    pre_staves: list[Staff] | None = None
+    pre_diag: dict = {}
+    pre_error: str | None = None
+    try:
+        pre_staves, pre_diag = find_staves(page, backend)
+    except StaffFindError as exc:
+        pre_error = str(exc)
+
+    result = deskew_page(page, backend=backend, initial_staves=pre_staves,
+                         initial_diag=pre_diag, options=options)
+    if result.staves is None:
+        raise StaffFindError(pre_error or "; ".join(
+            str(b.get("error")) for b in result.diagnostics.get("bands", [])))
+
+    if pre_staves is not None:
+        diag = dict(result.staff_diag) if result.applied else dict(pre_diag)
+        diag["oracle_mae"] = pre_diag.get("oracle_mae")
+        diag["oracle_frame"] = "pre_deskew" if result.applied else "original"
+    else:
+        diag = dict(result.staff_diag)
+        diag["oracle_mae"] = None
+        diag["oracle_frame"] = "unavailable"
+    diag["deskew"] = result.diagnostics
+    return result.page, result.staves, diag
 
 
 def apply_shear(page: StackPage, plans: list[BandSkew], *,
