@@ -290,8 +290,14 @@ def split_beam_group(ink: np.ndarray, space: float, templates=None):
     return out
 
 
-def overlay(page_path, staff: Staff, masks: Masks, out_path):
-    img = cv2.imread(str(page_path), cv2.IMREAD_COLOR)
+def overlay(page_path, staff: Staff, masks: Masks, out_path, *, image=None):
+    if image is not None:
+        img = cv2.cvtColor(
+            np.where(np.asarray(image).astype(bool), 0, 255).astype("uint8"),
+            cv2.COLOR_GRAY2BGR,
+        )
+    else:
+        img = cv2.imread(str(page_path), cv2.IMREAD_COLOR)
     if img is None:
         return
     for n in masks.notes:

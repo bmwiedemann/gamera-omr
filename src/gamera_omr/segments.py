@@ -193,8 +193,14 @@ def assign_measures(comps: list[Component], bounds: list[tuple[float, float]]):
 
 
 def save_overlay(page_path: str | Path, staves: list[Staff], barlines_by_staff: dict[int, list[float]],
-                 comps: list[Component], out_path: str | Path):
-    img = Image.open(page_path).convert("RGB")
+                 comps: list[Component], out_path: str | Path, *,
+                 image=None):
+    if image is not None:
+        img = Image.fromarray(
+            np.where(np.asarray(image).astype(bool), 0, 255).astype("uint8")
+        ).convert("RGB")
+    else:
+        img = Image.open(page_path).convert("RGB")
     draw = ImageDraw.Draw(img)
     for staff in staves:
         for y in staff.lines:
