@@ -102,12 +102,14 @@ def find_rest_bars(comps: list[Component], staff: Staff) -> list[Component]:
     return bars
 
 
-def find_barlines(arr: np.ndarray, staff: Staff, loose: bool = False) -> list[float]:
+def find_barlines(arr: np.ndarray, staff: Staff, loose: bool = False,
+                  flush: bool = False) -> list[float]:
     """Column centres of full-height vertical strokes (barlines).
 
     Modern engravings extend barlines above/below the staff (strict test).
-    Older vocal scores often draw them flush with the staff, so `loose`
-    accepts a stroke that reaches the bottom line.
+    Older vocal scores often draw them flush with the staff; `flush` accepts
+    a stroke that reaches the bottom line, and `loose` widens the top and
+    lowers the bottom tolerance further.
     """
     top = max(0, int(round(staff.top)) - 3)
     bottom = min(arr.shape[0] - 1, int(round(staff.bottom)) + 3)
@@ -135,8 +137,9 @@ def find_barlines(arr: np.ndarray, staff: Staff, loose: bool = False) -> list[fl
         if lengths[k] < (0.92 if loose else 0.95) * staff_px:
             continue
         # Modern barlines extend below the bottom line; older ones may be
-        # flush with it.  Older bars also often start just inside the top line.
-        lower = bot_off - 1 if loose else bot_off + 2
+        # flush with it.  A one-pixel band-origin change after deskewing must
+        # not turn every flush barline into a miss.
+        lower = bot_off - 1 if loose else (bot_off if flush else bot_off + 2)
         upper_start = (top_off + max(2, int(round(0.6 * staff.space)))
                        if loose else top_off + 2)
         if starts[k] > upper_start or ends[k] < lower:
