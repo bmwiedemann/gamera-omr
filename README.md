@@ -4,9 +4,9 @@ An optical music recognition engine for the BWV 248 project, built on
 **Gamera 4 + the MusicStaves toolkit** (the recognition core that Rodan wraps).
 
 Status: **Stage 1 + first reader** — Python 3.13 port, per-system skew/curvature
-correction, staff finding/validation, staff-line removal, connected-component
-segmentation, barline/measure detection, a kNN glyph classifier, note/beam
-decoding, MusicXML output, and debug overlays.
+correction, grand-staff (piano) reading, staff finding/validation, staff-line
+removal, connected-component segmentation, barline/measure detection, a kNN glyph
+classifier, note/beam/chord decoding, MusicXML output, and debug overlays.
 
 ## Rest detection (Rösler/Sibley first)
 
@@ -112,6 +112,38 @@ notes, and symbol-level rest/accidental and flagged-duration semantics still nee
 work.  The flush-barline and note-anchored onset paths are specific to Rösler; the
 Sibley and NBA prints keep the strict/measure-fraction paths, which score better
 there.
+
+## Piano grand staffs
+
+Per-system piano crops (`work/piano_all/p-*-sN.png`, `work/mvt/*/piano/*.png`) are
+read with `--source piano`:
+
+```bash
+.venv/bin/python -m gamera_omr.cli read \
+    --image ~/git/music/work/piano_all/p-001-s0.png \
+    --source piano --voice P --movement 1 -o /tmp/piano.musicxml
+```
+
+- The two staves are paired into one system and share measure boundaries; the
+  upper staff uses G2 and the lower F4, and the result is a two-part score
+  (`Piano RH`, `Piano LH`).
+- A `models/piano/model.xml` font model (trained on deskewed piano systems) is
+  selected automatically.  Staff removal still runs on RGB/greyscale crops;
+  `StackPage.binary()` now converts RGB piano scans through `to_onebit()` instead
+  of calling Otsu on RGB.
+- **Long stems:** beam groups are split with a distance-transform head detector,
+  not only template matching.  Filled noteheads remain thick blobs while long
+  stems and beams are thin; several heads on one long stem become a chord.  The
+  old `w <= 0.6*space` stem filter is relaxed to an aspect-ratio test so long
+  stems are not discarded.
+- Simultaneous heads within `0.6*space` share an onset and duration, and the
+  MusicXML writer emits them as chords.
+
+Current status: `p-001-s0` reads 8 measures with 29 notes and 4 chords (the raw
+page previously produced 1 note).  The homr reference for the same system has 44
+notes and 14 chords, so piano reading is usable but still less complete.  Known
+gaps: clef changes inside a system are not followed, voices are approximated by
+simultaneous onsets, and grand-staff deskewing is not yet implemented.
 
 ## Current results
 
@@ -219,6 +251,11 @@ editable, and runs a smoke test.
 
 # notehead repair is automatic for Sibley; force it for another noisy print
 .venv/bin/python -m gamera_omr.cli read ... --repair-crossings -o /tmp/old.musicxml
+
+# piano grand-staff crop (two staves, two output parts)
+.venv/bin/python -m gamera_omr.cli read \
+    --image ~/git/music/work/piano_all/p-001-s0.png \
+    --source piano --voice P --movement 1 -o /tmp/piano.musicxml
 
 # rebuilding the glyph model (headless labelling)
 .venv/bin/python -m gamera_omr.cli corpus --image IMAGE.png --out /tmp/corpus

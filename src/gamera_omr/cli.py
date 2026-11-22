@@ -23,8 +23,11 @@ def _flush_barlines(source) -> bool:
 
 def _prepare(args):
     source = getattr(args, "source", None)
+    # Piano systems are grand staves: the per-system band model does not
+    # apply yet, so they use the original image and per-staff clefs below.
+    enabled = not args.no_deskew and source != "piano"
     return deskew.prepare_page(args.image, backend=args.backend,
-                               enabled=not args.no_deskew,
+                               enabled=enabled,
                                flush_barlines=_flush_barlines(source))
 
 
@@ -55,6 +58,38 @@ def _gamera_version() -> str:
         return getattr(gamera, "__version__", "unknown")
     except Exception as exc:  # pragma: no cover - diagnostic only
         return f"unavailable ({exc})"
+
+
+def _decode_piano(staves, items, predictions, dots, fifths, bar, arr):
+    """Decode a grand-staff system into right/left-hand event streams.
+
+    The two staves share measure boundaries; each staff gets its own clef.
+    """
+    rh, lh, bounds_all = [], [], []
+    offset = 0
+    pairs = [(staves[i], staves[i + 1] if i + 1 < len(staves) else None)
+             for i in range(0, len(staves), 2)]
+    for upper, lower in pairs:
+        bounds = upper.bounds or segments.measure_bounds(
+            upper, segments.find_barlines(arr, upper))
+        if lower is not None and len(bounds) <= 1:
+            alt = lower.bounds or segments.measure_bounds(
+                lower, segments.find_barlines(arr, lower))
+            if len(alt) > len(bounds):
+                bounds = alt
+        for staff, clef, target in ((upper, "G2", rh), (lower, "F4", lh)):
+            if staff is None:
+                continue
+            ev = decode.decode_staff(
+                staff, items, predictions, bounds, clef, fifths, dots=dots,
+                legacy=True, bar_length=bar, require_head=False,
+                recover_edges=False)
+            for event in ev:
+                event.measure += offset
+            target.extend(ev)
+        bounds_all.extend(bounds)
+        offset += len(bounds)
+    return rh, lh, bounds_all, offset
 
 
 def cmd_doctor(args) -> int:
@@ -178,7 +213,8 @@ def cmd_read(args) -> int:
         glyphs.save_corpus(items, corpus)
         predictions, _model_path = _load_predictions(corpus, args, args.source)
 
-    clef = config.clef(args.source, args.voice)
+    piano = args.source == "piano"
+    clef = "G2" if piano else config.clef(args.source, args.voice)
     fifths = config.key_fifths(args.movement) or 0
     time_signature = config.time_signature(args.movement)
     arr = page.array()
@@ -200,6 +236,27 @@ def cmd_read(args) -> int:
     bounds_all = []
     tacet = set()
     bar = Fraction(meter.TimeSignature(time_signature).barDuration.quarterLength)
+    if piano:
+        rh, lh, bounds_all, offset = _decode_piano(
+            staves, items, predictions, dots, fifths, bar, arr)
+        space = sum(s.space for s in staves) / max(1, len(staves))
+        for part in (rh, lh):
+            part[:] = decode.normalize_measures(part, offset, bar)
+            part[:] = decode.assign_onsets_from_x(
+                part, bounds_all, bar, anchor=True, chord_tol=0.6 * space)
+        events = rh + lh
+        musicxml.write_parts([(rh, "G2", "Piano RH"), (lh, "F4", "Piano LH")],
+                             offset, fifths, time_signature, args.out)
+        counts = {}
+        for event in events:
+            counts[event.kind] = counts.get(event.kind, 0) + 1
+        print(f"{len(events)} events {counts}, {offset} measures, "
+              f"backend {diag['backend']} -> {args.out}")
+        fills = decode.measure_fill(rh, offset, bar)
+        bad = [(i + 1, str(s)) for i, s in enumerate(fills) if s != bar]
+        if bad:
+            print(f"measure-fill mismatches ({len(bad)}): {bad[:16]}")
+        return 0
     for staff in staves:
         if staff.bounds:
             bounds = staff.bounds
@@ -262,57 +319,70 @@ def cmd_report(args) -> int:
     arr = page.array()
     cleaned = remove_staff_lines(page, staves, repair=repair)
     all_comps = segments.components(cleaned.image)
-    clef = config.clef(args.source, args.voice)
+    piano = args.source == "piano"
+    clef = "G2" if piano else config.clef(args.source, args.voice)
     fifths = config.key_fifths(args.movement) or 0
     time_signature = config.time_signature(args.movement)
     bar = Fraction(meter.TimeSignature(time_signature).barDuration.quarterLength)
     forced_x = args.source in ("rosler", "sibley")
     x_rhythm = forced_x
 
-    events: list = []
-    drops, barlines, measures = {}, {}, {}
-    offset = 0
-    bounds_all = []
-    tacet = set()
-    for staff in staves:
-        _kept, dropped = segments.filter_components(all_comps, staff)
-        drops[str(staff.index)] = dropped
-        bars = segments.find_barlines(arr, staff, flush=_flush_barlines(args.source))
-        if staff.bounds:
-            bounds = staff.bounds
-        else:
-            bounds = segments.measure_bounds(staff, bars)
-        bounds_all.extend(bounds)
-        if x_rhythm and args.tacet_bars:
-            for c in segments.find_rest_bars(all_comps, staff):
-                for i, (x0, x1) in enumerate(bounds):
-                    if (x0 <= c.cx < x1
-                            and abs(c.cx - (x0 + x1) / 2) <= 0.25 * (x1 - x0)):
-                        tacet.add(offset + i)
-        barlines[str(staff.index)] = len(bars)
-        measures[str(staff.index)] = len(bounds)
-        staff_events = decode.decode_staff(staff, items, predictions, bounds,
-                                           clef, fifths, dots=[],
-                                           legacy=legacy, bar_length=bar,
-                                           require_head=x_rhythm,
-                                           recover_edges=args.source.startswith("bga"))
-        for event in staff_events:
-            event.measure += offset
-        events.extend(staff_events)
-        offset += len(bounds)
-
-    events = decode.normalize_measures(events, offset, bar, tacet=tacet)
-    note_measures = len({e.measure for e in events if e.kind == "note"})
-    auto_x = (args.source.startswith("bga")
-              and note_measures < 0.5 * max(offset, 1))
-    if forced_x or auto_x:
-        events = decode.assign_onsets_from_x(
-            events, bounds_all, bar,
-            anchor=args.source in ("rosler", "bga", "bga2"))
+    if piano:
+        rh, lh, bounds_all, offset = _decode_piano(
+            staves, items, predictions, [], fifths, bar, arr)
+        space = sum(s.space for s in staves) / max(1, len(staves))
+        for part in (rh, lh):
+            part[:] = decode.normalize_measures(part, offset, bar)
+            part[:] = decode.assign_onsets_from_x(
+                part, bounds_all, bar, anchor=True, chord_tol=0.6 * space)
+        events = rh + lh
+        drops, barlines, measures = {}, {}, {}
+        fills = decode.measure_fill(rh, offset, bar)
     else:
-        decode.fit_durations(events, offset, bar)
-        events = decode.assign_onsets(events, offset, bar)
-    fills = decode.measure_fill(events, offset, bar)
+        events: list = []
+        drops, barlines, measures = {}, {}, {}
+        offset = 0
+        bounds_all = []
+        tacet = set()
+        for staff in staves:
+            _kept, dropped = segments.filter_components(all_comps, staff)
+            drops[str(staff.index)] = dropped
+            bars = segments.find_barlines(arr, staff, flush=_flush_barlines(args.source))
+            if staff.bounds:
+                bounds = staff.bounds
+            else:
+                bounds = segments.measure_bounds(staff, bars)
+            bounds_all.extend(bounds)
+            if x_rhythm and args.tacet_bars:
+                for c in segments.find_rest_bars(all_comps, staff):
+                    for i, (x0, x1) in enumerate(bounds):
+                        if (x0 <= c.cx < x1
+                                and abs(c.cx - (x0 + x1) / 2) <= 0.25 * (x1 - x0)):
+                            tacet.add(offset + i)
+            barlines[str(staff.index)] = len(bars)
+            measures[str(staff.index)] = len(bounds)
+            staff_events = decode.decode_staff(staff, items, predictions, bounds,
+                                               clef, fifths, dots=[],
+                                               legacy=legacy, bar_length=bar,
+                                               require_head=x_rhythm,
+                                               recover_edges=args.source.startswith("bga"))
+            for event in staff_events:
+                event.measure += offset
+            events.extend(staff_events)
+            offset += len(bounds)
+
+        events = decode.normalize_measures(events, offset, bar, tacet=tacet)
+        note_measures = len({e.measure for e in events if e.kind == "note"})
+        auto_x = (args.source.startswith("bga")
+                  and note_measures < 0.5 * max(offset, 1))
+        if forced_x or auto_x:
+            events = decode.assign_onsets_from_x(
+                events, bounds_all, bar,
+                anchor=args.source in ("rosler", "bga", "bga2"))
+        else:
+            decode.fit_durations(events, offset, bar)
+            events = decode.assign_onsets(events, offset, bar)
+        fills = decode.measure_fill(events, offset, bar)
     mismatches = [(i + 1, str(s)) for i, s in enumerate(fills) if s != bar]
 
     classes, confidences = {}, []
