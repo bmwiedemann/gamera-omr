@@ -164,6 +164,52 @@ def find_barlines(arr: np.ndarray, staff: Staff, loose: bool = False,
     return barlines
 
 
+def find_grand_barlines(arr: np.ndarray, upper: Staff, lower: Staff,
+                        *, min_coverage: float = 0.92) -> list[float]:
+    """Barlines that span the whole grand staff.
+
+    Piano stems and beams can be as tall as a staff; requiring a single
+    vertical stroke from the upper staff's top to the lower staff's bottom
+    separates real barlines from long stems.
+    """
+    top = max(0, int(round(upper.top)) - 3)
+    bottom = min(arr.shape[0] - 1, int(round(lower.bottom)) + 3)
+    need = bottom - top + 1
+    x0 = max(0, int(round(min(upper.left, lower.left))))
+    x1 = min(arr.shape[1] - 1, int(round(max(upper.right, lower.right))))
+    space = max(upper.space, lower.space)
+    candidates = []
+    for x in range(x0, x1 + 1):
+        column = arr[top:bottom + 1, x]
+        idx = np.flatnonzero(column)
+        if len(idx) == 0:
+            continue
+        breaks = np.flatnonzero(np.diff(idx) > 1)
+        starts = np.r_[idx[0], idx[breaks + 1]]
+        ends = np.r_[idx[breaks], idx[-1]]
+        k = int(np.argmax(ends - starts + 1))
+        if ends[k] - starts[k] + 1 < min_coverage * need:
+            continue
+        if starts[k] > 6 or ends[k] < need - 7:
+            continue
+        candidates.append(x)
+    groups = []
+    for x in candidates:
+        if groups and x - groups[-1][-1] <= 1:
+            groups[-1].append(x)
+        else:
+            groups.append([x])
+    start = min(upper.left, lower.left) + 5.0 * space
+    bars = []
+    for group in groups:
+        width = group[-1] - group[0] + 1
+        centre = (group[0] + group[-1]) / 2
+        if width > max(2.0, 0.6 * space) or centre < start:
+            continue
+        bars.append(centre)
+    return bars
+
+
 def measure_bounds(staff: Staff, barlines: list[float]) -> list[tuple[float, float]]:
     right = staff.right
     start = staff.left + 5.0 * staff.space

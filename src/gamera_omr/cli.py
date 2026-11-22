@@ -70,8 +70,14 @@ def _decode_piano(staves, items, predictions, dots, fifths, bar, arr):
     pairs = [(staves[i], staves[i + 1] if i + 1 < len(staves) else None)
              for i in range(0, len(staves), 2)]
     for upper, lower in pairs:
-        bounds = upper.bounds or segments.measure_bounds(
-            upper, segments.find_barlines(arr, upper))
+        if lower is not None:
+            bars = segments.find_grand_barlines(arr, upper, lower)
+            bounds = (segments.measure_bounds(upper, bars) if bars
+                      else upper.bounds or segments.measure_bounds(
+                          upper, segments.find_barlines(arr, upper)))
+        else:
+            bounds = upper.bounds or segments.measure_bounds(
+                upper, segments.find_barlines(arr, upper))
         if lower is not None and len(bounds) <= 1:
             alt = lower.bounds or segments.measure_bounds(
                 lower, segments.find_barlines(arr, lower))
