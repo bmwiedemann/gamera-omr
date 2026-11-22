@@ -164,11 +164,17 @@ def oracle_mae(staves: list[Staff], path: str | Path) -> float | None:
     return float(np.mean(errors)) if errors else None
 
 
-def find_staves(page: StackPage, backend: str = "auto") -> tuple[list[Staff], dict]:
+def find_staves(page: StackPage, backend: str = "auto", *,
+                allow_oracle: bool = True) -> tuple[list[Staff], dict]:
     """Find the (monophonic) staff systems of one stack page.
 
     Returns the staves and a diagnostics dict; raises StaffFindError if no
     backend validates and the OpenCV oracle is unavailable.
+
+    `allow_oracle=False` is for corrected pages: the oracle and its x extents
+    are measured on the original file, so they are in the wrong frame after a
+    deskew.  In that mode the Gamera finders and `refine_extent` are used
+    alone.
     """
     backends = ["projections", "miyao"] if backend == "auto" else [backend]
     tried = []
@@ -178,7 +184,11 @@ def find_staves(page: StackPage, backend: str = "auto") -> tuple[list[Staff], di
         except Exception as exc:  # the finder itself failed
             tried.append({"backend": name, "error": f"{type(exc).__name__}: {exc}"})
             continue
-        if not apply_oracle_extent(page, staves):
+        if allow_oracle:
+            if not apply_oracle_extent(page, staves):
+                for staff in staves:
+                    refine_extent(page, staff)
+        else:
             for staff in staves:
                 refine_extent(page, staff)
         ok, reasons = validate_staves(staves, page.image)
@@ -194,9 +204,14 @@ def find_staves(page: StackPage, backend: str = "auto") -> tuple[list[Staff], di
                 "backend": name,
                 "staves": len(staves),
                 "tried": tried,
-                "oracle_mae": oracle_mae(staves, page.path),
+                "oracle_mae": oracle_mae(staves, page.path) if allow_oracle else None,
             }
+            if not allow_oracle:
+                diag["oracle_frame"] = "disabled_deskewed_frame"
             return staves, diag
+
+    if not allow_oracle:
+        raise StaffFindError(f"all staff finders failed: {tried}")
 
     # Fall back to the proven OpenCV detector (positions only, no pixel removal).
     try:

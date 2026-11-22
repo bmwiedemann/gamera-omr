@@ -61,6 +61,16 @@ def test_barlines_and_measures():
     assert 12 <= sum(counts) <= 18, counts
 
 
+@_needs(CHORALE)
+def test_staff_finding_without_oracle_frame():
+    page = load_stack(CHORALE)
+    staves, diag = find_staves(page, allow_oracle=False)
+    ok, reasons = validate_staves(staves, page.image)
+    assert ok, reasons
+    assert diag["oracle_mae"] is None
+    assert diag["oracle_frame"] == "disabled_deskewed_frame"
+
+
 @_needs(CHORUS)
 def test_staff_finding_six_systems():
     page = load_stack(CHORUS)
