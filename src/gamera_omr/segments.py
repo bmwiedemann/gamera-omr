@@ -174,8 +174,15 @@ def measure_bounds(staff: Staff, barlines: list[float]) -> list[tuple[float, flo
         bars = [b for b in bars if b > start]
     edges = [start]
     for x in bars:
-        if x > edges[-1] + 1.0 * staff.space:
-            edges.append(x)
+        if x <= edges[-1] + 1.0 * staff.space:
+            continue
+        # A double bar/repeat at a section end is two strokes a few pixels
+        # apart; treating both as measures creates a tiny phantom measure.
+        # Move the boundary to the outer stroke instead.
+        if len(edges) > 1 and x - edges[-1] <= 2.2 * staff.space:
+            edges[-1] = x
+            continue
+        edges.append(x)
     if right > edges[-1] + 1.0 * staff.space:
         edges.append(right)
     bounds = list(zip(edges[:-1], edges[1:]))
