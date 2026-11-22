@@ -34,7 +34,7 @@ Rösler and Sibley now have their own kNN models rather than the NBA one:
 
 | source | model | training data | page-1 note / pitch F1 |
 |---|---|---|---|
-| Rösler | `models/rosler/model.xml` | raw soprano p1 | 0.32 / 0.61 |
+| Rösler | `models/rosler/model.xml` | raw soprano p1 | 0.38 / 0.74 |
 | Sibley | `models/sibley/model.xml` | deskewed S-02/S-03 (S-01 held out) | 0.33 / 0.58 |
 | Sibley, old model | `models/sibley/model-raw.xml` | raw soprano p1 | 0.25 / 0.46 |
 
@@ -85,14 +85,16 @@ Current soprano page results (truth = the checked soprano part over the page ran
 
 | page | notes truth/omr | note F1 raw → deskew | pitch F1 raw → deskew |
 |---|---|---|---|
-| Rösler p1 | 74 / 78 → 74 / 91 | 0.237 → **0.315** | 0.447 → **0.606** |
+| Rösler p1 (bars 33–70) | 105 / 71 → 105 / 84 | 0.250 → **0.381** | 0.534 → **0.741** |
 | Sibley p1 | 74 / 60 → 74 / 98 | 0.240 → **0.326** | 0.416 → **0.581** |
 | NBA mvt 5 (no-op) | 45 / 43 → 45 / 43 | 0.9545 → 0.9545 | 0.9773 → 0.9773 |
 
 Sibley S-02 now yields six validated staves where the raw finder failed, and the
 retrained model plus notehead repair (below) raises Sibley page-1 pitch F1 from 0.42
-to 0.58.  The remaining Sibley/Rösler errors are mostly rhythm/onset placement and
-measure-level differences, not skew or glyph identity.
+to 0.58.  Rösler uses flush barlines and note-anchored onsets; its page spans bars
+33–70 (38 measures), not the 29-measure window assumed earlier.  The remaining
+Sibley/Rösler errors are mostly rhythm/onset placement and measure-level differences,
+not skew or glyph identity.
 
 When a notehead sits on a staff line, staff removal cuts it in half and shifts the
 detected centre by ~a quarter space (often one pitch step).  `remove_staff_lines`
@@ -100,9 +102,11 @@ can rejoin the halves where both sides are wide enough to be a notehead.  This i
 for Sibley (and via `--repair-crossings`) and off for the small Rösler staves and the
 clean NBA engravings, where it slightly reduced F1.
 
-Remaining bottlenecks on these pages: Rösler barlines are inset/flush with the staff
-(the loose barline mode exists but over-splits), and symbol-level rest/accidental
-semantics (durations, in-measure accidentals) still need work.
+Remaining bottlenecks on these pages: Rösler still misses about a fifth of the sung
+notes, and symbol-level rest/accidental and flagged-duration semantics still need
+work.  The flush-barline and note-anchored onset paths are specific to Rösler; the
+Sibley and NBA prints keep the strict/measure-fraction paths, which score better
+there.
 
 ## Current results
 
@@ -114,7 +118,7 @@ Scored against the checked NBA-derived readings (`partitur/BWV248/gemeinfrei/...
 | Nr. 5 Choral, soprano | NBA, 1960 | 45 | 43 | **0.95** | **0.98** |
 | Nr. 5 Choral, soprano | BGA, 1856 | 45 | 37 | 0.37 | 0.63 |
 | Nr. 12 Choral, soprano | NBA, 1960 | 49 | 46 | 0.44 | 0.80 |
-| Nr. 1, soprano page 1 | Rösler, c.1900 | 74 | 91 | 0.32 | 0.61 |
+| Nr. 1, soprano page 1 | Rösler, c.1900 | 105 | 84 | 0.38 | 0.74 |
 | Nr. 1, soprano page 1 | Sibley, c.1900 | 74 | 98 | 0.33 | 0.58 |
 
 The 1900s scores are far more variable than NBA.  Rest placement is now structural
