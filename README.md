@@ -136,14 +136,19 @@ read with `--source piano`:
   stems and beams are thin; several heads on one long stem become a chord.  The
   old `w <= 0.6*space` stem filter is relaxed to an aspect-ratio test so long
   stems are not discarded.
+- Notehead repair is on for piano as well: a head sitting on a staff line was
+  cut in half and looked like an open/partial head, defeating both blob
+  detection and pitch.
 - Simultaneous heads within `0.6*space` share an onset and duration, and the
   MusicXML writer emits them as chords.
 
-Current status: `p-001-s0` reads 8 measures with 29 notes and 4 chords (the raw
-page previously produced 1 note).  The homr reference for the same system has 44
-notes and 14 chords, so piano reading is usable but still less complete.  Known
-gaps: clef changes inside a system are not followed, voices are approximated by
-simultaneous onsets, and grand-staff deskewing is not yet implemented.
+Current status: `p-001-s0` reads 8 measures with 39 notated notes (13 chords);
+the same page previously produced 1 note.  The homr reference for this system has
+44 notes and 14 chords, so piano reading is close but still less complete.
+`p-050-s0` reads 32 notes/3 chords over 8 measures.  Known gaps: clef changes
+inside a system are not followed, voices are approximated by simultaneous
+onsets, grand-staff deskewing is not implemented, and measure counts can differ
+from homr on dense systems.
 
 ## Current results
 

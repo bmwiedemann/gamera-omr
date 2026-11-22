@@ -205,7 +205,7 @@ def default_model(source: str) -> Path:
 def cmd_read(args) -> int:
     page, staves, diag = _prepare(args)
     legacy = not args.source.startswith("nba")
-    repair = ((args.source == "sibley" or args.repair_crossings)
+    repair = ((args.source in ("sibley", "piano") or args.repair_crossings)
               and not args.no_repair_crossings)
     items = glyphs.extract(page, staves, repair=repair)
     with tempfile.TemporaryDirectory() as td:
@@ -308,7 +308,7 @@ def cmd_report(args) -> int:
     """Per-page reliability metrics; flags pages that need manual review."""
     page, staves, diag = _prepare(args)
     legacy = not args.source.startswith("nba")
-    repair = ((args.source == "sibley" or args.repair_crossings)
+    repair = ((args.source in ("sibley", "piano") or args.repair_crossings)
               and not args.no_repair_crossings)
     items = glyphs.extract(page, staves, repair=repair)
     with tempfile.TemporaryDirectory() as td:
