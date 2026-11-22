@@ -34,11 +34,11 @@ the older editions have font-specific models rather than the NBA one:
 
 | source | model | training data | page-1 note / pitch F1 |
 |---|---|---|---|
-| Rösler | `models/rosler/model.xml` | raw soprano p1 | 0.38 / 0.74 |
-| Sibley | `models/sibley/model.xml` | deskewed S-02/S-03 (S-01 held out) | 0.33 / 0.58 |
+| Rösler | `models/rosler/model.xml` | raw soprano p1 | 0.37 / 0.73 |
+| Sibley | `models/sibley/model.xml` | deskewed S-02/S-03 (S-01 held out) | 0.34 / 0.59 |
 | Sibley, old model | `models/sibley/model-raw.xml` | raw soprano p1 | 0.25 / 0.46 |
 | BGA, dense pages | `models/bga/model.xml` | raw BGA pages | 0.31 / 0.63 |
-| BGA, rest-heavy pages | `models/bga/model-deskew.xml` | deskewed BGA S-02–S-05 | 0.55 / 0.55 |
+| BGA, rest-heavy pages | `models/bga/model-deskew.xml` | deskewed BGA S-02–S-05 | 0.53 / 0.59 |
 
 These are current-pipeline numbers, so they include the per-system deskewing and, for
 Sibley, the notehead repair below.  The Sibley model was retrained on deskewed pages
@@ -89,10 +89,10 @@ Current soprano page results (truth = the checked soprano part over the page ran
 
 | page | notes truth/omr | note F1 raw → deskew | pitch F1 raw → deskew |
 |---|---|---|---|
-| Rösler p1 (bars 33–70) | 105 / 71 → 105 / 84 | 0.250 → **0.381** | 0.534 → **0.741** |
-| Sibley p1 | 74 / 60 → 74 / 98 | 0.240 → **0.326** | 0.416 → **0.581** |
-| BGA p1 (bars 1–39, mostly rests) | 15 / 15 → 15 / 14 | 0.333 → **0.552** | 0.600 → 0.552 |
-| NBA mvt 5 (no-op) | 45 / 43 → 45 / 43 | 0.9545 → 0.9545 | 0.9773 → 0.9773 |
+| Rösler p1 (bars 33–70) | 105 / 84 → 105 / 86 | 0.254 → **0.367** | 0.497 → **0.733** |
+| Sibley p1 | 74 / 82 → 74 / 100 | 0.269 → **0.345** | 0.500 → **0.586** |
+| BGA p1 (bars 1–39, mostly rests) | 15 / 20 → 15 / 19 | 0.400 → **0.529** | 0.571 → **0.588** |
+| NBA mvt 5 (no-op) | 45 / 44 → 45 / 44 | 0.9663 → 0.9663 | 0.9888 → 0.9888 |
 
 Sibley S-02 now yields six validated staves where the raw finder failed, and the
 retrained model plus notehead repair (below) raises Sibley page-1 pitch F1 from 0.42
@@ -152,12 +152,12 @@ Scored against the checked NBA-derived readings (`partitur/BWV248/gemeinfrei/...
 
 | page | source / font | truth notes | omr notes | note F1 | pitch F1 |
 |---|---|---|---|---|---|
-| Nr. 5 Choral, soprano | NBA, 1960 | 45 | 43 | **0.95** | **0.98** |
+| Nr. 5 Choral, soprano | NBA, 1960 | 45 | 44 | **0.97** | **0.99** |
 | Nr. 5 Choral, soprano | BGA, 1856 | 45 | 38 | 0.31 | 0.63 |
 | Nr. 12 Choral, soprano | NBA, 1960 | 49 | 46 | 0.44 | 0.80 |
-| Nr. 1, soprano page 1 | BGA, 1856 | 15 | 14 | 0.55 | 0.55 |
-| Nr. 1, soprano page 1 | Rösler, c.1900 | 105 | 84 | 0.38 | 0.74 |
-| Nr. 1, soprano page 1 | Sibley, c.1900 | 74 | 98 | 0.33 | 0.58 |
+| Nr. 1, soprano page 1 | BGA, 1856 | 15 | 19 | 0.53 | 0.59 |
+| Nr. 1, soprano page 1 | Rösler, c.1900 | 105 | 86 | 0.37 | 0.73 |
+| Nr. 1, soprano page 1 | Sibley, c.1900 | 74 | 100 | 0.34 | 0.59 |
 
 The 1900s scores are far more variable than NBA.  Rest placement is now structural
 (empty measures become rests, printed rests are classified, gaps become rests), and
