@@ -102,14 +102,23 @@ def find_rest_bars(comps: list[Component], staff: Staff) -> list[Component]:
     return bars
 
 
-def find_barlines(arr: np.ndarray, staff: Staff) -> list[float]:
-    """Column centres of full-height vertical strokes (barlines)."""
+def find_barlines(arr: np.ndarray, staff: Staff, loose: bool = False) -> list[float]:
+    """Column centres of full-height vertical strokes (barlines).
+
+    Modern engravings extend barlines above/below the staff (strict test).
+    Older vocal scores often draw them flush with the staff, so `loose`
+    accepts a stroke that reaches the bottom line.
+    """
     top = max(0, int(round(staff.top)) - 3)
     bottom = min(arr.shape[0] - 1, int(round(staff.bottom)) + 3)
     band = arr[top:bottom + 1, :]
     top_off = int(round(staff.top)) - top
     bot_off = int(round(staff.bottom)) - top
     staff_px = bot_off - top_off + 1
+    if loose:
+        # The band adds ~3 px above/below; a flush barline is only as tall
+        # as the staff itself.
+        staff_px = max(1, int(round(staff.height)) + 1)
     x0 = max(0, int(round(staff.left)))
     x1 = min(arr.shape[1] - 1, int(round(staff.right)))
     candidates = []
@@ -123,11 +132,14 @@ def find_barlines(arr: np.ndarray, staff: Staff) -> list[float]:
         ends = np.r_[idx[breaks], idx[-1]]
         lengths = ends - starts + 1
         k = int(np.argmax(lengths))
-        if lengths[k] < 0.95 * staff_px:
+        if lengths[k] < (0.92 if loose else 0.95) * staff_px:
             continue
-        # Barlines start at/above the top line and extend below the bottom
-        # line; stems end at a staff line, so they fail the lower test.
-        if starts[k] > top_off + 2 or ends[k] < bot_off + 2:
+        # Modern barlines extend below the bottom line; older ones may be
+        # flush with it.  Older bars also often start just inside the top line.
+        lower = bot_off - 1 if loose else bot_off + 2
+        upper_start = (top_off + max(2, int(round(0.6 * staff.space)))
+                       if loose else top_off + 2)
+        if starts[k] > upper_start or ends[k] < lower:
             continue
         candidates.append(x)
     groups = []

@@ -1,0 +1,14 @@
+{
+  "0": "note.black", "1": "rest.8", "2": "skip", "3": "text",
+  "4": "text", "5": "note.black", "6": "note.black", "7": "beam.group",
+  "8": "text", "9": "note.black", "10": "accidental", "11": "skip",
+  "12": "beam.group", "13": "skip", "14": "skip", "15": "skip",
+  "16": "note.black", "17": "beam", "18": "text", "19": "text",
+  "20": "accidental", "21": "note.black", "22": "skip", "23": "beam.group",
+  "24": "note.black", "25": "skip", "26": "note.black", "27": "note.black",
+  "28": "note.black", "29": "skip", "30": "skip", "31": "beam.group",
+  "32": "note.black", "33": "accidental", "34": "rest.quarter", "35": "note.black",
+  "36": "skip", "37": "beam.group", "38": "note.black", "39": "note.black",
+  "40": "text", "41": "text", "42": "skip", "43": "note.black",
+  "44": "beam.group", "45": "beam.group", "46": "skip", "47": "beam.group"
+}

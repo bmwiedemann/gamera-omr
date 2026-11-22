@@ -33,6 +33,30 @@ all measures sum to 3/8); the remaining note F1 is limited by the common (NBA) g
 model on these fonts.  Per-font models and symbol-level quarter/eighth-rest classes are
 the next step.  NBA output is unchanged at note F1 0.95 / pitch F1 0.98.
 
+## Per-font models
+
+`read`/`report` pick `models/<font>/model.xml` automatically (`bga` covers `bga2`), so
+Rösler and Sibley now have their own kNN models rather than the NBA one:
+
+| source | model | training page | note F1 | pitch F1 |
+|---|---|---|---|---|
+| Rösler | `models/rosler/model.xml` | soprano p1 (bar 33) | 0.22 | 0.45 |
+| Sibley | `models/sibley/model.xml` | soprano p1 (bar 33) | 0.22 | 0.44 |
+| Rösler, held-out | same model | soprano p2 (bar 68) | 0.18 | 0.33 |
+| Sibley, before model | common (NBA) | soprano p1 | 0.10 | 0.33 |
+| Rösler, before model | common (NBA) | soprano p1 | 0.22 | 0.40 |
+
+The Sibley model roughly doubles note F1; Rösler improves mainly on pitch, because its
+notation is currently limited by measure segmentation, not glyph classification.  The
+models' class sets include `rest.8`/`rest.quarter`, `beam.group`, `accidental`, `text`,
+`beam`, `slur` and `skip`; rest events feed the rest/x-rhythm pass.  Training labels and
+models are in `models/{rosler,sibley}/`; regenerating a corpus/sheet and re-running
+`train` reproduces them.
+
+Remaining bottlenecks on these pages: Rösler barlines are inset/flush with the staff
+(the loose barline mode exists but over-splits), and symbol-level rest/accidental
+semantics (durations, in-measure accidentals) still need work.
+
 ## Current results
 
 Scored against the checked NBA-derived readings (`partitur/BWV248/gemeinfrei/...`) with
