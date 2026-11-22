@@ -284,6 +284,37 @@ def stem_direction(ink: np.ndarray, space: float) -> str | None:
     return None
 
 
+def _erosion_heads(ink: np.ndarray, space: float) -> list[tuple[float, float]]:
+    """Noteheads as blobs thick enough to survive a head-sized erosion.
+
+    A notehead joined to a long stem or beam is one distance-transform blob
+    whose bounding box is the whole stem, so the blob filter misses it.  An
+    elliptical erosion of about half a staff space removes stems and leaves
+    the head cores; a beam that survives is far too wide to be a head.
+    """
+    side = max(3, int(round(0.48 * space)))
+    if side % 2 == 0:
+        side += 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (side, side))
+    eroded = cv2.erode(_u8(ink), kernel) > 0
+    n, _labels, stats, cents = _components(eroded.astype(np.uint8))
+    h, w = ink.shape
+    margin = max(2, int(round(0.25 * space)))
+    heads = []
+    for i in range(1, n):
+        x, y, bw, bh, area = stats[i]
+        cx, cy = cents[i]
+        if not (margin <= cx <= w - 1 - margin
+                and margin <= cy <= h - 1 - margin):
+            continue  # a beam fragment at the glyph edge
+        if (0.25 * space <= bw <= 1.7 * space
+                and 0.2 * space <= bh <= 1.5 * space
+                and bw <= 2.0 * bh and bh <= 2.0 * bw
+                and area >= 0.35 * bw * bh):
+            heads.append((float(cents[i][0]), float(cents[i][1])))
+    return heads
+
+
 def split_beam_group(ink: np.ndarray, space: float, templates=None):
     """Split a beamed group into (head_x, head_y, duration) per notehead."""
     h, w = ink.shape
@@ -327,9 +358,11 @@ def split_beam_group(ink: np.ndarray, space: float, templates=None):
     if not matched_heads:
         matched_heads = [(x, y) for _s, x, y in matched[:4]]
     blob_heads = _distance_heads(ink, space)
-    # The blob detector handles long stems and chords; templates are better
-    # for clean single-note groups.  Prefer whichever finds more heads.
-    heads = blob_heads if len(blob_heads) > len(matched_heads) else matched_heads
+    eroded_heads = _erosion_heads(ink, space)
+    # The distance transform handles long stems and chords, the erosion
+    # recovers heads swallowed by a beam, and templates are better for clean
+    # single-note groups.  Prefer whichever finds more heads.
+    heads = max((matched_heads, blob_heads, eroded_heads), key=len)
     group_levels = sorted((by0 + by1) / 2 for _a, by0, _b, by1 in beam_boxes)
     group_count = 1
     if group_levels:

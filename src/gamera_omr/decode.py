@@ -232,6 +232,25 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
             continue
         duration = duration_for(label, g.ink, g.space, legacy=legacy)
         if duration is None:
+            # A large piano figure of stacked chords and beams can be one
+            # connected component and get classified as text.  It still
+            # contains noteheads, so split it like a beamed group.
+            if (voices and label in ("text", "skip")
+                    and g.w >= 2.0 * g.space and g.h >= 2.5 * g.space):
+                heads = notes_module.split_beam_group(g.ink, g.space, templates)
+                if len(heads) >= 2:
+                    direction = notes_module.stem_direction(g.ink, g.space)
+                    for hx, hy, head_duration in heads:
+                        head_y = g.y0 + hy
+                        x = g.x0 + hx
+                        position = staff_position(staff, head_y)
+                        pitch = pitch_at(staff, clef_at(x), position, fifths)
+                        measure = measure_of(x)
+                        if measure is not None:
+                            events.append(Event(
+                                measure, x, pitch, head_duration, "note", g,
+                                flexible=True, hy=head_y, direction=direction))
+                    continue
             # A notehead merged with a slur/fermata is classified slur/text;
             # the tall narrow glyph still contains the head.  A bare stem or
             # barline is also text and is only a few pixels wide, so require a

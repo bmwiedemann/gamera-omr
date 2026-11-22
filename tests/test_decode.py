@@ -96,6 +96,18 @@ def test_simultaneous_opposite_stems_split_into_voices():
     assert all(e.direction == "down" and e.voice == 1 for e in groups[1])
 
 
+def test_erosion_heads_find_head_on_long_stem():
+    space = 10
+    ink = np.zeros((50, 30), np.uint8)
+    ink[4:8, 0:30] = 1           # beam
+    ink[4:47, 16] = 1            # long stem
+    ink[39:47, 8:18] = 1         # filled head at its bottom
+    heads = notes._erosion_heads(ink, space)
+    assert len(heads) == 1
+    x, y = heads[0]
+    assert 10 <= x <= 15 and 40 <= y <= 46
+
+
 def test_alternating_stem_directions_stay_one_voice():
     # A single line flips stem direction with the note's staff position.
     events = [_voice_event(10, "up"), _voice_event(40, "down"),
