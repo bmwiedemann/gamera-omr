@@ -244,6 +244,112 @@ def _attachment_score(arr: np.ndarray, staff: Staff, x0: int, x1: int) -> int:
     return joined
 
 
+def _stroke_extent(arr: np.ndarray, staff: Staff, x0: int, x1: int):
+    """(top, bottom) rows of the longest vertical run in columns x0..x1."""
+    margin = max(2, int(round(2.5 * staff.space)))
+    top = max(0, int(round(staff.top)) - margin)
+    bottom = min(arr.shape[0] - 1, int(round(staff.bottom)) + margin)
+    column = arr[top:bottom + 1, max(0, x0):x1 + 1].any(axis=1)
+    idx = np.flatnonzero(column)
+    if len(idx) == 0:
+        return None
+    breaks = np.flatnonzero(np.diff(idx) > 1)
+    starts = np.r_[idx[0], idx[breaks + 1]]
+    ends = np.r_[idx[breaks], idx[-1]]
+    k = int(np.argmax(ends - starts))
+    return top + int(starts[k]), top + int(ends[k])
+
+
+def _beam_on_line(arr: np.ndarray, staff: Staff, x0: int, x1: int) -> bool:
+    """True when a beam lying on a staff line leaves a long stem's end.
+
+    The line mask of `_attachment_score` hides such a beam.  Beside the
+    stroke, a bare line is a thin run; a beam on it makes the run through
+    the line much thicker all along one side, right from the stroke.
+    """
+    extent = _stroke_extent(arr, staff, x0, x1)
+    if extent is None:
+        return False
+    space = staff.space
+    thick = max(1.0, staff.thickness)
+    width = max(4, int(round(1.0 * space)))
+    h, w = arr.shape
+    for line in staff.lines:
+        y = int(round(line))
+        # only a line at one end of the stroke, where a beam joins a stem
+        if min(abs(y - extent[0]), abs(y - extent[1])) > 0.6 * space:
+            continue
+        for cols in (range(x1 + 1, min(w, x1 + 1 + width)),
+                     range(max(0, x0 - width), x0)):
+            cols = list(cols)
+            if len(cols) < width:
+                continue
+            thick_cols = 0
+            for x in cols:
+                if not arr[y, x]:
+                    break
+                a = b = y
+                while a - 1 >= 0 and arr[a - 1, x]:
+                    a -= 1
+                while b + 1 < h and arr[b + 1, x]:
+                    b += 1
+                if b - a + 1 < thick + 0.35 * space:
+                    break
+                thick_cols += 1
+            if thick_cols == len(cols):
+                return True
+    return False
+
+
+def _head_at_end(arr: np.ndarray, staff: Staff, x0: int, x1: int) -> bool:
+    """True when a notehead sits at an end of the stroke (it is a stem).
+
+    Beside one end of a stem, a filled or open head fills much of a
+    head-sized box and touches the stroke; beside a barline there are only
+    staff lines and the odd thin tie.
+    """
+    extent = _stroke_extent(arr, staff, x0, x1)
+    if extent is None:
+        return False
+    space = staff.space
+    h, w = arr.shape
+    reach = int(round(0.6 * space))
+    box = int(round(1.1 * space))
+    half = int(staff.thickness) // 2 + 1
+    line_rows = set()
+    for line in staff.lines:
+        y = int(round(line))
+        line_rows.update(range(y - half, y + half + 1))
+    # the stroke's own columns: those carrying most of its length
+    length = extent[1] - extent[0] + 1
+
+    def long_run(x):
+        if not 0 <= x < w:
+            return False
+        col = arr[extent[0]:extent[1] + 1, x] > 0
+        return col.mean() >= 0.8
+
+    while x0 - 1 >= 0 and long_run(x0 - 1) and x1 - x0 < 6:
+        x0 -= 1
+    while long_run(x1 + 1) and x1 - x0 < 6:
+        x1 += 1
+    if length < 2 * space:
+        return False
+    for end in extent:
+        rows = [y for y in range(max(0, end - reach), min(h, end + reach + 1))
+                if y not in line_rows]
+        if len(rows) < 0.4 * space:
+            continue
+        for cols in ((max(0, x0 - box), x0), (x1 + 1, min(w, x1 + 1 + box))):
+            if cols[1] - cols[0] < box:
+                continue
+            patch = arr[rows, cols[0]:cols[1]] > 0
+            touch = patch[:, -1] if cols[1] == x0 else patch[:, 0]
+            if patch.mean() >= 0.35 and touch.sum() >= 0.25 * space:
+                return True
+    return False
+
+
 def find_barlines(arr: np.ndarray, staff: Staff, loose: bool = False,
                   flush: bool = False, flush_bottom: bool = False,
                   reject_stems: bool = False) -> list[float]:
@@ -277,7 +383,9 @@ def find_barlines(arr: np.ndarray, staff: Staff, loose: bool = False,
         ends = np.r_[idx[breaks], idx[-1]]
         lengths = ends - starts + 1
         k = int(np.argmax(lengths))
-        if lengths[k] < (0.92 if loose else 0.95) * staff_px:
+        # Some NBA barlines stop a little short of the bottom line.
+        short = flush_bottom and not (loose or flush)
+        if lengths[k] < (0.92 if loose else 0.88 if short else 0.95) * staff_px:
             continue
         # Modern barlines extend below the bottom line; older ones may be
         # flush with it.  A one-pixel band-origin change after deskewing must
@@ -287,7 +395,7 @@ def find_barlines(arr: np.ndarray, staff: Staff, loose: bool = False,
         elif flush:
             lower = bot_off
         elif flush_bottom:
-            lower = bot_off
+            lower = bot_off - max(1, int(round(0.4 * staff.space)))
         else:
             lower = bot_off + 2
         upper_start = (top_off + max(2, int(round(0.6 * staff.space)))
@@ -313,6 +421,10 @@ def find_barlines(arr: np.ndarray, staff: Staff, loose: bool = False,
             continue
         score = (_attachment_score(arr, staff, group[0], group[-1])
                  if reject_stems else 0)
+        if (reject_stems and score < 3
+                and (_beam_on_line(arr, staff, group[0], group[-1])
+                     or _head_at_end(arr, staff, group[0], group[-1]))):
+            score = 3
         if score >= 3:
             rejected.append((centre, score))
             continue
@@ -338,6 +450,9 @@ def find_barlines(arr: np.ndarray, staff: Staff, loose: bool = False,
     # barline.  Keep an attached stroke near the left edge when no other
     # barline is close, or that first measure disappears.
     for centre, score in list(rejected):
+        x = int(round(centre))
+        if _head_at_end(arr, staff, x, x):
+            continue  # a stem: its head hangs at one end
         if (centre < staff.left + 10.0 * staff.space
                 and all(abs(centre - kept) > 4.0 * staff.space
                         for kept, _score in scored)):
@@ -355,6 +470,39 @@ def find_barlines(arr: np.ndarray, staff: Staff, loose: bool = False,
                 continue
         barlines.append(centre)
     return sorted(barlines)
+
+
+def _split_grand_barline(column, top: int, upper: Staff, lower: Staff,
+                         gap: int) -> bool:
+    """A barline left open between the staves for a dynamic mark.
+
+    It still runs unbroken through each staff and covers most of the gap.
+    """
+    def through(staff):
+        a = int(round(staff.top)) - top
+        b = int(round(staff.bottom)) - top
+        seg = column[max(0, a - 1):b + 2]
+        if len(seg) == 0:
+            return False
+        idx = np.flatnonzero(seg)
+        return (len(idx) >= 0.97 * len(seg)
+                and (len(idx) < 2 or np.diff(idx).max() <= gap))
+
+    if not (through(upper) and through(lower)):
+        return False
+    # From each staff the stroke continues into the gap without a break;
+    # together the two stubs cover most of it.
+    a = int(round(upper.bottom)) - top
+    b = int(round(lower.top)) - top
+    if b - a < 2:
+        return False
+    down = 0
+    while a + down < b and column[a + down]:
+        down += 1
+    up = 0
+    while b - up > a and column[b - up]:
+        up += 1
+    return down + up >= 0.55 * (b - a) and min(down, up) >= 0.1 * (b - a)
 
 
 def find_grand_barlines(arr: np.ndarray, upper: Staff, lower: Staff,
@@ -386,11 +534,14 @@ def find_grand_barlines(arr: np.ndarray, upper: Staff, lower: Staff,
         starts = np.r_[idx[0], idx[breaks + 1]]
         ends = np.r_[idx[breaks], idx[-1]]
         k = int(np.argmax(ends - starts + 1))
-        if ends[k] - starts[k] + 1 < min_coverage * need:
-            continue
-        if starts[k] > start_margin or ends[k] < need - end_margin:
-            continue
-        candidates.append(x)
+        whole = (ends[k] - starts[k] + 1 >= min_coverage * need
+                 and starts[k] <= start_margin
+                 and ends[k] >= need - end_margin)
+        if whole or (_split_grand_barline(column, top, upper, lower, gap)
+                     and not _head_at_end(arr, upper, x, x)
+                     and not _head_at_end(arr, lower, x, x)):
+            # (two stems meeting from both staves have heads at their ends)
+            candidates.append(x)
     groups = []
     for x in candidates:
         if groups and x - groups[-1][-1] <= 1:

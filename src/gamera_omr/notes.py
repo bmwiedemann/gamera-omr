@@ -764,6 +764,26 @@ def _two_strokes(ink: np.ndarray, space: float) -> bool:
             and max(a1 - a0, b1 - b0) + 1 <= 0.35 * space)
 
 
+def _staggered_strokes(ink: np.ndarray, space: float) -> bool:
+    """True for a natural: its left stroke starts higher and its right
+    stroke ends lower; a sharp's strokes span about the same rows."""
+    h, w = ink.shape
+    cover = ink.astype(bool).sum(axis=0)
+    tall = np.flatnonzero(cover >= 1.8 * space)
+    if len(tall) < 2:
+        return False
+    left, right = tall[0], tall[-1]
+    if right - left < 0.25 * space:
+        return False
+
+    def extent(x):
+        rows = np.flatnonzero(ink[:, max(0, x - 1):x + 2].any(axis=1))
+        return rows[0], rows[-1]
+
+    (lt, lb), (rt, rb) = extent(left), extent(right)
+    return rt - lt >= 0.25 * space and rb - lb >= 0.25 * space
+
+
 def _head_likeness(ink: np.ndarray, space: float, x: float, y: float,
                    templates) -> float:
     """How much the ink around (x, y) looks like a notehead."""
@@ -796,9 +816,10 @@ def accidental_kind(ink: np.ndarray, space: float) -> str | None:
     if not (1.6 * space <= h <= 3.8 * space):
         return None
     if _two_strokes(ink, space) and h >= 2.3 * space:
-        if 0.95 * space <= w <= 1.45 * space:
+        staggered = _staggered_strokes(ink, space)
+        if 0.95 * space <= w <= 1.45 * space and not staggered:
             return "sharp"
-        if 0.55 * space <= w < 0.95 * space:
+        if 0.55 * space <= w < 0.95 * space or (staggered and w <= 1.45 * space):
             return "natural"
         return None
     if not (0.5 * space <= w <= 1.15 * space and h <= 3.2 * space):

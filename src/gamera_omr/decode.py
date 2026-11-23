@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from fractions import Fraction
 
+import cv2
 import numpy as np
 from music21 import key as mkey
 from music21 import pitch as mpitch
@@ -303,6 +304,9 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
         # a beam and halve the duration.
         single_stem = (stem_heads and label == "beam.group"
                        and g.w <= 1.8 * g.space and g.h >= 2.2 * g.space)
+        if (stem_heads and not voices and label == "beam.group"
+                and not wide_note and g.h < 2.0 * g.space):
+            continue  # a tie or slur: a beamed group has stems
         if (label == "beam.group" and not single_stem) or wide_note:
             heads = notes_module.split_beam_group(
                 g.ink, g.space, templates,
@@ -467,14 +471,28 @@ def decode_staff(staff: Staff, glyphs: list[Glyph], predictions: dict[str, dict]
             events, staff, glyphs, binary, bounds, measure_of, clef_at, fifths,
             signature_limit, signature_end, clef_changes, notes_module)
     if stem_heads:
+        offsets: dict[int, float] = {}
         for e in events:
-            if e.kind == "note" and e.glyph is not None:
-                y = refine_head_y(e.glyph, staff, e.x, e.hy)
-                if y != e.hy:
-                    e.hy = y
-                    e.pitch = pitch_at(staff, clef_at(e.x),
-                                       staff_position(staff, y), fifths)
-        apply_accidentals(events, staff, glyphs, fifths)
+            if e.kind != "note":
+                continue
+            # A slightly tilted staff (below the deskew threshold) puts the
+            # lines a quarter space off their average height at the ends.
+            off = 0.0
+            if binary is not None:
+                bucket = int(e.x // (2 * staff.space))
+                if bucket not in offsets:
+                    offsets[bucket] = line_offset(binary, staff, e.x)
+                off = offsets[bucket]
+            y = e.hy
+            if e.glyph is not None:
+                y = refine_head_y(e.glyph, staff, e.x, e.hy, off)
+            if y != e.hy or off:
+                e.hy = y
+                e.pitch = pitch_at(staff, clef_at(e.x),
+                                   staff_position(staff, y - off), fifths)
+        apply_accidentals(events, staff, glyphs, fifths,
+                          start=(signature_end + staff.space
+                                 if signature_end is not None else None))
     if binary is not None:
         # A head beyond the first ledger-line position needs that ledger
         # line; dynamics, fingerings and the other staff's notes in the gap
@@ -593,7 +611,38 @@ def _signature_end(staff: Staff, glyphs: list[Glyph], time_signature: set[str],
     return end + 0.5 * space
 
 
-def refine_head_y(g: Glyph, staff: Staff, x: float, y: float) -> float:
+def line_offset(binary: np.ndarray, staff: Staff, x: float) -> float:
+    """How far the staff lines near x lie below their average heights.
+
+    Each line is found as the rows that are inked across most of a window
+    four spaces wide; the median shift of the lines found is returned, or 0
+    when fewer than three lines are clear (beams, chords, the staff end).
+    """
+    space = staff.space
+    h, w = binary.shape
+    x0, x1 = int(round(x - 2 * space)), int(round(x + 2 * space))
+    if x0 < 0 or x1 > w or x0 < staff.left or x1 > staff.right:
+        x0, x1 = max(0, int(staff.left), x0), min(w, int(staff.right), x1)
+    if x1 - x0 < 2 * space:
+        return 0.0
+    reach = max(1, int(round(0.4 * space)))
+    shifts = []
+    for line in staff.lines:
+        y = int(round(line))
+        a, b = max(0, y - reach), min(h, y + reach + 1)
+        counts = (binary[a:b, x0:x1] > 0).mean(axis=1)
+        rows = np.flatnonzero(counts >= 0.8)
+        if len(rows) == 0 or len(rows) > max(4, staff.thickness + 3):
+            continue
+        shifts.append(a + rows.mean() - line)
+    if len(shifts) < 3:
+        return 0.0
+    off = float(np.median(shifts))
+    return off if abs(off) >= 1.0 else 0.0
+
+
+def refine_head_y(g: Glyph, staff: Staff, x: float, y: float,
+                  offset: float = 0.0) -> float:
     """Head centre from the head's own top and bottom edges.
 
     With the staff-line crossings kept, a head touching a line from one side
@@ -636,7 +685,7 @@ def refine_head_y(g: Glyph, staff: Staff, x: float, y: float) -> float:
 
     def on_line(edge):
         # The line's average height can be off by a pixel or two locally.
-        return any(abs(edge - line) <= 0.5 * thick + 0.2 * space
+        return any(abs(edge - line - offset) <= 0.5 * thick + 0.2 * space
                    for line in staff.lines)
 
     # A head in a space between two lines spans both: its middle is right.
@@ -650,8 +699,68 @@ def refine_head_y(g: Glyph, staff: Staff, x: float, y: float) -> float:
     return (top + bottom) / 2.0
 
 
+def nearby_accidental(glyphs: list[Glyph], staff: Staff, x: float, y: float,
+                      notes_module) -> str | None:
+    """Kind of an accidental just left of a head, from any glyph pieces.
+
+    An accidental close to its head is often one glyph with the head's beam
+    group, or cut into stroke and bowl by line removal.  The window ends
+    left of the head (and of a down-stem on its left) and spans the
+    accidental's height: a flat's bowl sits at the head with its stroke
+    rising two spaces; sharps and naturals are centred on it.  The pieces
+    are pasted together and gaps the size of a staff line are closed.
+    """
+    space = staff.space
+    x0, x1 = int(round(x - 2.2 * space)), int(round(x - 0.6 * space))
+    y0, y1 = int(round(y - 2.3 * space)), int(round(y + 1.7 * space))
+    if x1 - x0 < 0.5 * space:
+        return None
+    canvas = np.zeros((y1 - y0 + 1, x1 - x0 + 1), np.uint8)
+    for g in glyphs:
+        if g.staff != staff.index:
+            continue
+        gh, gw = g.ink.shape
+        ax, bx = max(x0, g.x0), min(x1 + 1, g.x0 + gw)
+        ay, by = max(y0, g.y0), min(y1 + 1, g.y0 + gh)
+        if ax >= bx or ay >= by:
+            continue
+        canvas[ay - y0:by - y0, ax - x0:bx - x0] |= (
+            g.ink[ay - g.y0:by - g.y0, ax - g.x0:bx - g.x0] > 0)
+    if not canvas.any():
+        return None
+    gap = max(3, int(round(staff.thickness)) + 2)
+    closed = cv2.morphologyEx(canvas, cv2.MORPH_CLOSE,
+                              np.ones((gap, 1), np.uint8))
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(closed,
+                                                           connectivity=8)
+    hy = y - y0
+    # single pieces, and a flat's stroke with its bowl cut off it
+    groups = [[j] for j in range(1, n)]
+    for i in range(1, n):
+        for j in range(1, n):
+            gap = stats[j][0] - (stats[i][0] + stats[i][2])
+            if i != j and 0 <= gap <= 0.35 * space:
+                groups.append([i, j])
+    for group in groups:
+        bx = min(stats[j][0] for j in group)
+        by = min(stats[j][1] for j in group)
+        ex = max(stats[j][0] + stats[j][2] for j in group)
+        ey = max(stats[j][1] + stats[j][3] for j in group)
+        bw, bh = ex - bx, ey - by
+        if bh < 1.6 * space:
+            continue
+        part = np.isin(labels[by:ey, bx:ex], group).astype(np.uint8)
+        kind = notes_module.accidental_kind(part, space)
+        if kind is None or (len(group) > 1 and kind != "flat"):
+            continue
+        centre = by + (0.68 * bh if kind == "flat" else 0.5 * bh)
+        if abs(centre - hy) <= 0.45 * space:
+            return kind
+    return None
+
+
 def apply_accidentals(events: list[Event], staff: Staff, glyphs: list[Glyph],
-                      fifths: int) -> None:
+                      fifths: int, start: float | None = None) -> None:
     """Apply printed sharps, naturals and flats to the notes they precede.
 
     An accidental stands just left of its head at the same height and holds
@@ -693,6 +802,14 @@ def apply_accidentals(events: list[Event], staff: Staff, glyphs: list[Glyph],
         if best is not None:
             taken.add(best[1])
             marked.append((notes[best[1]], kind))
+    # Accidentals joined to a beam group or cut apart by line removal.
+    for i, e in enumerate(notes):
+        if i in taken or e.x < (start if start is not None
+                                else staff.left + 8.0 * space):
+            continue
+        kind = nearby_accidental(glyphs, staff, e.x, e.hy, notes_module)
+        if kind is not None:
+            marked.append((e, kind))
     alter = {"sharp": 1, "natural": 0, "flat": -1}
     for event, kind in sorted(marked, key=lambda ek: ek[0].x):
         step = event.pitch.diatonicNoteNum
